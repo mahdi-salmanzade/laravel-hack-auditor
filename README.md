@@ -92,6 +92,7 @@ php artisan hack:scan
 | `--json` | Output raw JSON (perfect for CI/CD pipelines) |
 | `--save` | Persist results to the database for historical tracking |
 | `--force` | Skip confirmation prompt for large scans |
+| `--detailed` | Show full untruncated descriptions in the table |
 
 ```bash
 # Scan only your controllers
@@ -180,6 +181,7 @@ php artisan vendor:publish --tag=hack-auditor-config
 | `ai.model` | `null` | Model override. When `null`, uses your Laravel AI default. |
 | `ai.temperature` | `0.3` | Lower = more deterministic analysis. Recommended: `0.1` - `0.5`. |
 | `ai.max_tokens` | `4096` | Maximum tokens per AI response. Increase for very large codebases. |
+| `ai.timeout` | `120` | HTTP timeout in seconds for AI requests. Increase for slower models or large CTF generation. |
 
 ### Scan Paths
 

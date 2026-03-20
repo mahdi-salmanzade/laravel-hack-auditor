@@ -42,7 +42,7 @@ final class CTFGenerator implements CTFGeneratorInterface
 
         /** @var string $outputBase */
         $outputBase = config('hack-auditor.ctf.output_path', 'storage/hack-auditor/ctf');
-        $outputPath = storage_path($outputBase) . '/' . $directoryName;
+        $outputPath = storage_path($outputBase).'/'.$directoryName;
 
         File::ensureDirectoryExists($outputPath);
 
@@ -90,7 +90,7 @@ final class CTFGenerator implements CTFGeneratorInterface
         $data = json_decode($json, true);
 
         if (! is_array($data)) {
-            throw InvalidAIResponseException::fromJson($response);
+            throw InvalidAIResponseException::malformed('Failed to parse JSON', $response);
         }
 
         $requiredFields = [
@@ -101,7 +101,7 @@ final class CTFGenerator implements CTFGeneratorInterface
 
         foreach ($requiredFields as $field) {
             if (! isset($data[$field]) || ! is_string($data[$field])) {
-                throw InvalidAIResponseException::fromMissingField($field);
+                throw InvalidAIResponseException::missingField($field);
             }
         }
 
@@ -110,21 +110,85 @@ final class CTFGenerator implements CTFGeneratorInterface
     }
 
     /**
-     * Extract a JSON block from a potentially markdown-wrapped AI response.
+     * Extract a JSON block from a potentially markdown-wrapped AI response
+     * and sanitize control characters that break json_decode.
      */
     private function extractJson(string $response): string
     {
-        if (preg_match('/```(?:json)?\s*([\s\S]*?)```/', $response, $matches)) {
-            return trim($matches[1]);
+        // Match the outermost code fence (greedy inner match to avoid
+        // matching backtick blocks inside JSON string values).
+        if (preg_match('/\A\s*```(?:json)?\s*([\s\S]*)```\s*\z/', $response, $matches)) {
+            $json = trim($matches[1]);
+        } else {
+            $json = trim($response);
         }
 
-        return trim($response);
+        // If it parses cleanly, return as-is.
+        if (json_decode($json, true) !== null) {
+            return $json;
+        }
+
+        // AI sometimes puts literal newlines/tabs inside JSON string values.
+        // Walk through the string tracking whether we're inside a quoted value
+        // and escape only control characters found inside strings.
+        $length = strlen($json);
+        $result = '';
+        $inString = false;
+        $i = 0;
+
+        while ($i < $length) {
+            $char = $json[$i];
+
+            if (! $inString) {
+                if ($char === '"') {
+                    $inString = true;
+                }
+                $result .= $char;
+                $i++;
+
+                continue;
+            }
+
+            // Inside a string
+            if ($char === '\\' && $i + 1 < $length) {
+                // Already-escaped sequence — keep both chars
+                $result .= $char.$json[$i + 1];
+                $i += 2;
+
+                continue;
+            }
+
+            if ($char === '"') {
+                $inString = false;
+                $result .= $char;
+                $i++;
+
+                continue;
+            }
+
+            // Replace unescaped control characters
+            $ord = ord($char);
+            if ($ord < 32) {
+                $result .= match ($char) {
+                    "\n" => '\n',
+                    "\r" => '\r',
+                    "\t" => '\t',
+                    default => sprintf('\u%04x', $ord),
+                };
+            } else {
+                $result .= $char;
+            }
+
+            $i++;
+        }
+
+        return $result;
     }
 
     /**
      * Write the README.md file using the ctf-readme stub.
      *
-     * @param  array{title: string, difficulty: string, category: string, description: string, rules: string, hints: string} $data
+     * @param  array{title: string, difficulty: string, category: string, description: string, rules: string, hints: string}  $data
      */
     private function writeReadme(string $outputPath, array $data): void
     {
@@ -142,7 +206,7 @@ final class CTFGenerator implements CTFGeneratorInterface
     /**
      * Write the challenge.php file using the ctf-challenge stub.
      *
-     * @param  array{title: string, difficulty: string, category: string, challenge_code: string} $data
+     * @param  array{title: string, difficulty: string, category: string, challenge_code: string}  $data
      */
     private function writeChallenge(string $outputPath, array $data): void
     {
@@ -160,7 +224,7 @@ final class CTFGenerator implements CTFGeneratorInterface
     /**
      * Write the solution.php file with exploitation and fix details.
      *
-     * @param  array{title: string, category: string, solution_explanation: string, fix_explanation: string} $data
+     * @param  array{title: string, category: string, solution_explanation: string, fix_explanation: string}  $data
      */
     private function writeSolution(string $outputPath, array $data): void
     {
@@ -203,7 +267,7 @@ final class CTFGenerator implements CTFGeneratorInterface
      */
     private function writeFlag(string $outputPath, string $flag): void
     {
-        File::put("{$outputPath}/flag.txt", $flag . "\n");
+        File::put("{$outputPath}/flag.txt", $flag."\n");
     }
 
     /**
@@ -254,7 +318,7 @@ final class CTFGenerator implements CTFGeneratorInterface
      */
     private function loadStub(string $stubName): string
     {
-        $path = dirname(__DIR__, 2) . '/resources/stubs/' . $stubName;
+        $path = dirname(__DIR__, 2).'/resources/stubs/'.$stubName;
 
         if (! File::exists($path)) {
             throw new \RuntimeException("Stub file not found: {$path}");

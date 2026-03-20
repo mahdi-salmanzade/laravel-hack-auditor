@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\Log;
 use Laravel\Ai\AnonymousAgent;
 use RuntimeException;
 
-final class AIAdapter
+class AIAdapter
 {
     private readonly ?string $provider;
 
@@ -17,6 +17,8 @@ final class AIAdapter
     private readonly float $temperature;
 
     private readonly int $maxTokens;
+
+    private readonly int $timeout;
 
     private const int MAX_RETRIES = 3;
 
@@ -37,10 +39,14 @@ final class AIAdapter
         /** @var int $maxTokens */
         $maxTokens = (int) config('hack-auditor.ai.max_tokens', 4096);
 
+        /** @var int $timeout */
+        $timeout = (int) config('hack-auditor.ai.timeout', 120);
+
         $this->provider = $provider;
         $this->model = $model;
         $this->temperature = $temperature;
         $this->maxTokens = $maxTokens;
+        $this->timeout = $timeout;
     }
 
     /**
@@ -77,9 +83,19 @@ final class AIAdapter
         }
 
         throw new RuntimeException(
-            'AI request failed after ' . self::MAX_RETRIES . " attempts: {$lastException?->getMessage()}",
+            'AI request failed after '.self::MAX_RETRIES." attempts: {$lastException?->getMessage()}",
             previous: $lastException,
         );
+    }
+
+    /**
+     * Alias for send() used by the CTF generator.
+     *
+     * @throws RuntimeException When all retry attempts are exhausted.
+     */
+    public function ask(string $systemPrompt, string $userPrompt): string
+    {
+        return $this->send($systemPrompt, $userPrompt);
     }
 
     /**
@@ -101,6 +117,7 @@ final class AIAdapter
             prompt: $userPrompt,
             provider: $this->provider,
             model: $this->model,
+            timeout: $this->timeout,
         );
 
         return $response->text;

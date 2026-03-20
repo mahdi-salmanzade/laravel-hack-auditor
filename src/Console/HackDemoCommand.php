@@ -34,7 +34,7 @@ final class HackDemoCommand extends Command
     public function handle(): int
     {
         $demoDir = storage_path('hack-auditor/demo');
-        $demoFile = $demoDir . DIRECTORY_SEPARATOR . self::DEMO_CONTROLLER_FILENAME;
+        $demoFile = $demoDir.DIRECTORY_SEPARATOR.self::DEMO_CONTROLLER_FILENAME;
 
         try {
             $this->prepareDemoFile($demoDir, $demoFile);
@@ -197,7 +197,7 @@ final class HackDemoCommand extends Command
                 line: 39,
                 severity: SeverityLevel::High,
                 description: 'Redirect URL taken directly from user input without validation. Enables phishing via trusted domain.',
-                proof: "https://trusted-app.com/redirect?url=https://evil-phishing-site.com/login",
+                proof: 'https://trusted-app.com/redirect?url=https://evil-phishing-site.com/login',
                 fix: 'Validate redirect URLs against a whitelist: $allowed = [\'dashboard\', \'profile\']; abort_unless(in_array($url, $allowed), 400);',
             ),
             new Vulnerability(
@@ -282,7 +282,7 @@ final class HackDemoCommand extends Command
         $rows = [];
         foreach ($sorted as $index => $vuln) {
             $rows[] = [
-                '<fg=gray>' . ($index + 1) . '</>',
+                '<fg=gray>'.($index + 1).'</>',
                 $vuln->severity->label(),
                 "<options=bold>{$vuln->type->label()}</>",
                 "<fg=cyan>{$vuln->location}:{$vuln->line}</>",
@@ -303,10 +303,10 @@ final class HackDemoCommand extends Command
     {
         $this->line(
             "  Found <options=bold>{$report->totalCount()}</> vulnerabilities: "
-            . "<fg=red>{$report->criticalCount()} Critical</>, "
-            . "<fg=yellow>{$report->highCount()} High</>, "
-            . "<fg=blue>{$report->mediumCount()} Medium</>, "
-            . "<fg=gray>{$report->lowCount()} Low</>",
+            ."<fg=red>{$report->criticalCount()} Critical</>, "
+            ."<fg=yellow>{$report->highCount()} High</>, "
+            ."<fg=blue>{$report->mediumCount()} Medium</>, "
+            ."<fg=gray>{$report->lowCount()} Low</>",
         );
     }
 
@@ -346,7 +346,7 @@ final class HackDemoCommand extends Command
         $this->line("<fg=gray>{$tweetText}</>");
         $this->newLine();
 
-        if ($this->confirm('→ Copy this tweet?', false)) {
+        if ($this->input->isInteractive() && $this->confirm('→ Copy this tweet?', false)) {
             $this->copyToClipboard($tweetText);
         }
     }
@@ -399,7 +399,7 @@ final class HackDemoCommand extends Command
             return $text;
         }
 
-        return mb_substr($text, 0, $maxLength - 3) . '...';
+        return mb_substr($text, 0, $maxLength - 3).'...';
     }
 
     /**

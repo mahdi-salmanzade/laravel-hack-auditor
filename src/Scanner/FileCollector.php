@@ -77,25 +77,29 @@ final class FileCollector
      */
     public function collect(): Collection
     {
-        $files = new Collection();
+        $files = new Collection;
         $basePath = base_path();
         $maxSizeBytes = $this->maxFileSizeKb * 1024;
 
         foreach ($this->paths as $relativePath) {
-            $absolutePath = $basePath . DIRECTORY_SEPARATOR . $relativePath;
+            $absolutePath = $basePath.DIRECTORY_SEPARATOR.$relativePath;
 
             if (! is_dir($absolutePath)) {
                 continue;
             }
 
-            $finder = new Finder();
+            if ($this->isSensitivePath($relativePath)) {
+                continue;
+            }
+
+            $finder = new Finder;
             $finder->files()->in($absolutePath);
 
             $this->applyExtensionFilters($finder);
             $this->applyExcludePatterns($finder);
             $this->applySensitivePatterns($finder);
 
-            $finder->size('<= ' . $maxSizeBytes);
+            $finder->size('<= '.$maxSizeBytes);
 
             foreach ($finder as $file) {
                 if ($this->isBinaryFile($file)) {
@@ -117,7 +121,7 @@ final class FileCollector
     private function applyExtensionFilters(Finder $finder): void
     {
         $patterns = array_map(
-            fn (string $ext): string => '*' . ltrim($ext, '*'),
+            fn (string $ext): string => '*'.ltrim($ext, '*'),
             $this->fileExtensions,
         );
 
@@ -150,6 +154,30 @@ final class FileCollector
                 $finder->notName($pattern);
             }
         }
+    }
+
+    /**
+     * Determine if a scan path itself falls under a sensitive pattern.
+     *
+     * This catches cases where a sensitive directory (e.g. storage/logs)
+     * is explicitly listed in scan paths — the Finder-level notPath filter
+     * cannot exclude files when the Finder root is the sensitive directory itself.
+     */
+    private function isSensitivePath(string $relativePath): bool
+    {
+        foreach ($this->sensitivePatterns as $pattern) {
+            if (! str_contains($pattern, '/')) {
+                continue;
+            }
+
+            $normalized = rtrim($pattern, '/*');
+
+            if ($relativePath === $normalized || str_starts_with($relativePath, $normalized.'/')) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

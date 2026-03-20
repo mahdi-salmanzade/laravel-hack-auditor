@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\AI;
 
-final class PromptBuilder
+class PromptBuilder
 {
     /**
      * Build the system prompt for the AI security auditor.
@@ -75,6 +75,73 @@ PROMPT;
         }
 
         return $prompt;
+    }
+
+    /**
+     * Build the system prompt for CTF challenge generation.
+     */
+    public function forCtfGeneration(): string
+    {
+        return <<<'PROMPT'
+You are a CTF (Capture The Flag) challenge designer specializing in web security and Laravel.
+
+Create creative, realistic CTF challenges based on real vulnerability types found in Laravel applications.
+
+Return ONLY valid JSON (no markdown fences, no explanation outside JSON) with this exact structure:
+{
+    "title": "Creative challenge title",
+    "difficulty": "Easy|Medium|Hard|Expert",
+    "category": "Web Security",
+    "description": "A narrative description that sets the scene without giving away the solution",
+    "rules": "Challenge rules and constraints",
+    "hints": "Progressive hints from vague to specific, separated by newlines",
+    "challenge_code": "The complete vulnerable Laravel code that participants must exploit",
+    "solution_explanation": "Step-by-step solution explaining the exploit",
+    "fix_explanation": "How to fix the vulnerability properly"
+}
+
+Rules:
+- The challenge must be solvable but not trivially obvious.
+- The challenge code must be a complete, runnable Laravel snippet.
+- Include at least 3 progressive hints from vague to specific.
+- The solution must detail the exact exploit steps.
+- CRITICAL: Return strictly valid JSON. Use \n for newlines inside string values. Do NOT use literal/raw newlines inside JSON string values — they break JSON parsing.
+PROMPT;
+    }
+
+    /**
+     * Build the user prompt for CTF generation from actual source code.
+     */
+    public function ctfFromSourceCode(string $vulnerabilityType, string $sourceCode, string $flag): string
+    {
+        return <<<PROMPT
+Generate a CTF challenge based on the following real vulnerability found in a Laravel application.
+
+**Vulnerability Type:** {$vulnerabilityType}
+**Flag to embed:** {$flag}
+
+**Vulnerable Source Code:**
+```php
+{$sourceCode}
+```
+
+Create a challenge that is inspired by this real code. The challenge_code should be a modified version that is self-contained and exploitable.
+PROMPT;
+    }
+
+    /**
+     * Build the user prompt for CTF generation without source code.
+     */
+    public function ctfGeneric(string $vulnerabilityType, string $flag): string
+    {
+        return <<<PROMPT
+Generate a CTF challenge for the following vulnerability type in a Laravel application.
+
+**Vulnerability Type:** {$vulnerabilityType}
+**Flag to embed:** {$flag}
+
+Create a realistic, self-contained Laravel code snippet that contains this vulnerability type and can be exploited by participants.
+PROMPT;
     }
 
     /**

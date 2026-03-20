@@ -6,6 +6,8 @@ namespace Mahdi\HackAuditor;
 
 use Illuminate\Support\ServiceProvider;
 use Mahdi\HackAuditor\AI\AIAdapter;
+use Mahdi\HackAuditor\AI\PromptBuilder;
+use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Console\HackCTFCommand;
 use Mahdi\HackAuditor\Console\HackDemoCommand;
 use Mahdi\HackAuditor\Console\HackScanCommand;
@@ -15,8 +17,6 @@ use Mahdi\HackAuditor\CTF\CTFGenerator;
 use Mahdi\HackAuditor\Scanner\CodeExtractor;
 use Mahdi\HackAuditor\Scanner\FileCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
-use Mahdi\HackAuditor\AI\PromptBuilder;
-use Mahdi\HackAuditor\AI\ResponseParser;
 
 final class HackAuditorServiceProvider extends ServiceProvider
 {
@@ -26,7 +26,7 @@ final class HackAuditorServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(
-            __DIR__ . '/../config/hack-auditor.php',
+            __DIR__.'/../config/hack-auditor.php',
             'hack-auditor',
         );
 
@@ -48,7 +48,8 @@ final class HackAuditorServiceProvider extends ServiceProvider
 
         $this->app->singleton(CTFGenerator::class, function ($app): CTFGenerator {
             return new CTFGenerator(
-                aiAdapter: $app->make(AIAdapter::class),
+                ai: $app->make(AIAdapter::class),
+                promptBuilder: $app->make(PromptBuilder::class),
             );
         });
 
@@ -66,7 +67,7 @@ final class HackAuditorServiceProvider extends ServiceProvider
     public function boot(): void
     {
         if (config('hack-auditor.history.enabled', true)) {
-            $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
+            $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
         }
 
         if ($this->app->runningInConsole()) {
@@ -77,15 +78,15 @@ final class HackAuditorServiceProvider extends ServiceProvider
             ]);
 
             $this->publishes([
-                __DIR__ . '/../config/hack-auditor.php' => config_path('hack-auditor.php'),
+                __DIR__.'/../config/hack-auditor.php' => config_path('hack-auditor.php'),
             ], 'hack-auditor-config');
 
             $this->publishes([
-                __DIR__ . '/../database/migrations' => database_path('migrations'),
+                __DIR__.'/../database/migrations' => database_path('migrations'),
             ], 'hack-auditor-migrations');
 
             $this->publishes([
-                __DIR__ . '/../resources/stubs' => base_path('stubs/hack-auditor'),
+                __DIR__.'/../resources/stubs' => base_path('stubs/hack-auditor'),
             ], 'hack-auditor-stubs');
         }
     }

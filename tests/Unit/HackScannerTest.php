@@ -71,7 +71,7 @@ it('returns a VulnerabilityReport from scan', function (): void {
     expect($report)->toBeInstanceOf(VulnerabilityReport::class)
         ->and($report->overallScore)->toBe(100)
         ->and($report->vulnerabilities)->toBeArray()
-        ->and($report->summary)->toBe('No issues found.');
+        ->and($report->summary)->toBe('No files found to scan.');
 });
 
 it('returns an empty report when no files are found to scan', function (): void {
@@ -152,7 +152,7 @@ it('merges multiple chunk results correctly', function (): void {
     );
 
     // Test merging by manually creating two reports and using reflection
-    $parser = new ResponseParser();
+    $parser = new ResponseParser;
     $report1 = $parser->parse($response1);
     $report2 = $parser->parse($response2);
 
@@ -167,7 +167,7 @@ it('merges multiple chunk results correctly', function (): void {
 });
 
 it('recalculates score when merging reports', function (): void {
-    $parser = new ResponseParser();
+    $parser = new ResponseParser;
 
     $report1 = $parser->parse(buildValidAIResponse(score: 20, summary: 'Bad.'));
     $report2 = $parser->parse(buildValidAIResponse(score: 80, summary: 'Good.'));

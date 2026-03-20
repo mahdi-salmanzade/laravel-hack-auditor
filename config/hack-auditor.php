@@ -37,6 +37,7 @@ return [
         'model' => env('HACK_AUDITOR_AI_MODEL', null),
         'temperature' => 0.3,
         'max_tokens' => 4096,
+        'timeout' => 120,
     ],
 
     /*

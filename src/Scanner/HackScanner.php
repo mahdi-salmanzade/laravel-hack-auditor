@@ -164,7 +164,7 @@ final class HackScanner implements ScannerInterface
 
         $averageScore = (int) round($scoreSum / count($reports));
 
-        $mergedSummary = implode(' ', $summaries);
+        $mergedSummary = implode("\n\n", $summaries);
 
         return new VulnerabilityReport(
             vulnerabilities: $allVulnerabilities,

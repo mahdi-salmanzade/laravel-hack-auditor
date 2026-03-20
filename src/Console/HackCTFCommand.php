@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
+use Illuminate\Database\QueryException;
 use Mahdi\HackAuditor\CTF\CTFGenerator;
 use Mahdi\HackAuditor\Models\ScanResult;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
@@ -68,10 +69,16 @@ final class HackCTFCommand extends Command
      */
     private function handleFromScan(): int
     {
-        /** @var ScanResult|null $latestScan */
-        $latestScan = ScanResult::query()
-            ->latest()
-            ->first();
+        try {
+            /** @var ScanResult|null $latestScan */
+            $latestScan = ScanResult::query()
+                ->latest()
+                ->first();
+        } catch (QueryException) {
+            $this->components->error('No scan results found. Run `php artisan hack:scan --save` first.');
+
+            return self::FAILURE;
+        }
 
         if ($latestScan === null) {
             $this->components->error('No scan results found. Run `php artisan hack:scan --save` first.');
@@ -81,8 +88,8 @@ final class HackCTFCommand extends Command
 
         $this->components->info(
             "Loading scan from <options=bold>{$latestScan->created_at->format('Y-m-d H:i')}</>"
-            . " — Score: <options=bold>{$latestScan->score}/100</>"
-            . " — <options=bold>{$latestScan->total_vulnerabilities}</> vulnerabilities",
+            ." — Score: <options=bold>{$latestScan->score}/100</>"
+            ." — <options=bold>{$latestScan->total_vulnerabilities}</> vulnerabilities",
         );
         $this->newLine();
 
@@ -109,7 +116,7 @@ final class HackCTFCommand extends Command
      */
     private function generateAllFromScan(array $vulnerabilities): int
     {
-        $this->components->info("Generating CTF challenges for all <options=bold>" . count($vulnerabilities) . '</> findings...');
+        $this->components->info('Generating CTF challenges for all <options=bold>'.count($vulnerabilities).'</> findings...');
         $this->newLine();
 
         $generator = app(CTFGenerator::class);
@@ -119,7 +126,7 @@ final class HackCTFCommand extends Command
             $type = (string) ($vuln['type'] ?? 'unknown');
             $number = $index + 1;
 
-            $this->line("  <fg=cyan>[{$number}/" . count($vulnerabilities) . "]</> Generating CTF for <options=bold>{$type}</>...");
+            $this->line("  <fg=cyan>[{$number}/".count($vulnerabilities)."]</> Generating CTF for <options=bold>{$type}</>...");
 
             try {
                 $sourceCode = isset($vuln['proof']) && is_string($vuln['proof']) ? $vuln['proof'] : null;
@@ -294,13 +301,13 @@ final class HackCTFCommand extends Command
         };
 
         $this->line('  <fg=cyan>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</>');
-        $this->line("  <fg=green;options=bold>✓ Challenge Generated</>");
+        $this->line('  <fg=green;options=bold>✓ Challenge Generated</>');
         $this->line("  <fg=gray>Title:</>       <options=bold>{$title}</>");
         $this->line("  <fg=gray>Category:</>    {$category}");
         $this->line("  <fg=gray>Difficulty:</>  <fg={$difficultyColor}>{$difficulty}</>");
 
         if (isset($decoded['hints']) && is_string($decoded['hints'])) {
-            $this->line("  <fg=gray>Hints:</>       <fg=yellow>" . mb_substr($decoded['hints'], 0, 80) . '...</>');
+            $this->line('  <fg=gray>Hints:</>       <fg=yellow>'.mb_substr($decoded['hints'], 0, 80).'...</>');
         }
 
         $this->line('  <fg=cyan>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</>');

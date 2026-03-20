@@ -6,9 +6,10 @@ use Illuminate\Support\Collection;
 use Mahdi\HackAuditor\Scanner\CodeExtractor;
 
 beforeEach(function (): void {
-    $this->extractor = new CodeExtractor();
-    $this->tempDir = sys_get_temp_dir() . '/hack-auditor-extractor-' . uniqid();
+    $this->extractor = new CodeExtractor;
+    $this->tempDir = sys_get_temp_dir().'/hack-auditor-extractor-'.uniqid();
     mkdir($this->tempDir, 0755, true);
+    $this->tempDir = realpath($this->tempDir);
 });
 
 afterEach(function (): void {
@@ -31,7 +32,7 @@ afterEach(function (): void {
 });
 
 it('detects controller type from class structure', function (): void {
-    $filePath = $this->tempDir . '/UserController.php';
+    $filePath = $this->tempDir.'/UserController.php';
     file_put_contents($filePath, <<<'PHP'
     <?php
 
@@ -50,7 +51,7 @@ it('detects controller type from class structure', function (): void {
 });
 
 it('detects model type from class structure', function (): void {
-    $filePath = $this->tempDir . '/User.php';
+    $filePath = $this->tempDir.'/User.php';
     file_put_contents($filePath, <<<'PHP'
     <?php
 
@@ -71,7 +72,7 @@ it('detects model type from class structure', function (): void {
 });
 
 it('detects middleware type from class structure', function (): void {
-    $filePath = $this->tempDir . '/CheckAge.php';
+    $filePath = $this->tempDir.'/CheckAge.php';
     file_put_contents($filePath, <<<'PHP'
     <?php
 
@@ -90,7 +91,7 @@ it('detects middleware type from class structure', function (): void {
 });
 
 it('detects request type from class structure', function (): void {
-    $filePath = $this->tempDir . '/StoreUserRequest.php';
+    $filePath = $this->tempDir.'/StoreUserRequest.php';
     file_put_contents($filePath, <<<'PHP'
     <?php
 
@@ -111,10 +112,10 @@ it('detects request type from class structure', function (): void {
 });
 
 it('detects route type from path containing routes/', function (): void {
-    $routesDir = $this->tempDir . '/routes';
+    $routesDir = $this->tempDir.'/routes';
     mkdir($routesDir, 0755, true);
 
-    $filePath = $routesDir . '/web.php';
+    $filePath = $routesDir.'/web.php';
     file_put_contents($filePath, <<<'PHP'
     <?php
 
@@ -126,7 +127,8 @@ it('detects route type from path containing routes/', function (): void {
     PHP);
 
     // Set base_path to tempDir so relative path includes routes/
-    $this->app['path.base'] = $this->tempDir;
+    $reflector = new ReflectionProperty($this->app, 'basePath');
+    $reflector->setValue($this->app, $this->tempDir);
 
     $file = new SplFileInfo($filePath);
     $result = $this->extractor->extract($file);
@@ -135,7 +137,7 @@ it('detects route type from path containing routes/', function (): void {
 });
 
 it('returns other type for unrecognized files', function (): void {
-    $filePath = $this->tempDir . '/helpers.php';
+    $filePath = $this->tempDir.'/helpers.php';
     file_put_contents($filePath, <<<'PHP'
     <?php
 
@@ -154,10 +156,10 @@ it('returns other type for unrecognized files', function (): void {
 it('chunks files correctly based on config chunk_size', function (): void {
     $this->app['config']->set('hack-auditor.scan.chunk_size', 2);
 
-    $files = new Collection();
+    $files = new Collection;
 
     for ($i = 1; $i <= 5; $i++) {
-        $filePath = $this->tempDir . "/File{$i}.php";
+        $filePath = $this->tempDir."/File{$i}.php";
         file_put_contents($filePath, "<?php class File{$i} {}");
         $files->push(new SplFileInfo($filePath));
     }
@@ -173,10 +175,10 @@ it('chunks files correctly based on config chunk_size', function (): void {
 it('groups all files into one chunk when chunk_size exceeds file count', function (): void {
     $this->app['config']->set('hack-auditor.scan.chunk_size', 100);
 
-    $files = new Collection();
+    $files = new Collection;
 
     for ($i = 1; $i <= 3; $i++) {
-        $filePath = $this->tempDir . "/File{$i}.php";
+        $filePath = $this->tempDir."/File{$i}.php";
         file_put_contents($filePath, "<?php class File{$i} {}");
         $files->push(new SplFileInfo($filePath));
     }
@@ -188,7 +190,7 @@ it('groups all files into one chunk when chunk_size exceeds file count', functio
 });
 
 it('strips multi-line comments but preserves single-line comments', function (): void {
-    $filePath = $this->tempDir . '/Commented.php';
+    $filePath = $this->tempDir.'/Commented.php';
     file_put_contents($filePath, <<<'PHP'
     <?php
 
@@ -217,7 +219,7 @@ it('strips multi-line comments but preserves single-line comments', function ():
 });
 
 it('collapses excessive blank lines', function (): void {
-    $filePath = $this->tempDir . '/SpacedOut.php';
+    $filePath = $this->tempDir.'/SpacedOut.php';
     $content = "<?php\n\nclass A {\n\n\n\n\n\npublic function b() {}\n\n\n\n\n}";
     file_put_contents($filePath, $content);
 
@@ -242,12 +244,13 @@ it('returns empty content and other type for files with unresolvable path', func
 });
 
 it('extracts the correct relative path for files under base_path', function (): void {
-    $this->app['path.base'] = $this->tempDir;
+    $reflector = new ReflectionProperty($this->app, 'basePath');
+    $reflector->setValue($this->app, $this->tempDir);
 
-    $subDir = $this->tempDir . '/app/Http/Controllers';
+    $subDir = $this->tempDir.'/app/Http/Controllers';
     mkdir($subDir, 0755, true);
 
-    $filePath = $subDir . '/TestController.php';
+    $filePath = $subDir.'/TestController.php';
     file_put_contents($filePath, '<?php class TestController extends Controller {}');
 
     $file = new SplFileInfo($filePath);

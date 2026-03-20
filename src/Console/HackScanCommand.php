@@ -6,6 +6,7 @@ namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
 use Mahdi\HackAuditor\Models\ScanResult;
+use Mahdi\HackAuditor\Scanner\FileCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
@@ -26,7 +27,8 @@ final class HackScanCommand extends Command
         {--fix : Auto-generate fixes}
         {--json : Output as JSON}
         {--save : Save results to database}
-        {--force : Skip confirmation prompt for large scans}';
+        {--force : Skip confirmation prompt for large scans}
+        {--detailed : Show full descriptions in the table instead of truncating}';
 
     /**
      * The console command description.
@@ -116,6 +118,8 @@ final class HackScanCommand extends Command
 
         if (count($filteredVulnerabilities) > 0) {
             $this->displayVulnerabilityTable($filteredVulnerabilities);
+            $this->newLine();
+            $this->displayDetailedFindings($filteredVulnerabilities);
             $this->newLine();
         }
 
@@ -214,11 +218,24 @@ final class HackScanCommand extends Command
     }
 
     /**
-     * Display the summary paragraph from the AI analysis.
+     * Display the summary paragraphs from the AI analysis, word-wrapped for readability.
      */
     private function displaySummary(string $summary): void
     {
-        $this->line("  <fg=gray>{$summary}</>");
+        $paragraphs = preg_split('/\n{2,}/', trim($summary));
+
+        foreach ($paragraphs as $index => $paragraph) {
+            $paragraph = preg_replace('/\s+/', ' ', trim($paragraph));
+            $wrapped = wordwrap($paragraph, 100);
+
+            foreach (explode("\n", $wrapped) as $line) {
+                $this->line("  <fg=gray>{$line}</>");
+            }
+
+            if ($index < count($paragraphs) - 1) {
+                $this->newLine();
+            }
+        }
     }
 
     /**
@@ -229,15 +246,20 @@ final class HackScanCommand extends Command
     private function displayVulnerabilityTable(array $vulnerabilities): void
     {
         $sorted = $this->sortBySeverity($vulnerabilities);
+        $isVerbose = $this->option('detailed');
 
         $rows = [];
         foreach ($sorted as $index => $vuln) {
+            $description = $isVerbose
+                ? $vuln->description
+                : $this->truncateDescription($vuln->description, 120);
+
             $rows[] = [
-                '<fg=gray>' . ($index + 1) . '</>',
+                '<fg=gray>'.($index + 1).'</>',
                 $vuln->severity->label(),
                 "<options=bold>{$vuln->type->label()}</>",
                 "<fg=cyan>{$vuln->location}:{$vuln->line}</>",
-                $this->truncateDescription($vuln->description, 60),
+                $description,
             ];
         }
 
@@ -245,6 +267,34 @@ final class HackScanCommand extends Command
             ['<options=bold>#</>', '<options=bold>Severity</>', '<options=bold>Type</>', '<options=bold>Location:Line</>', '<options=bold>Description</>'],
             $rows,
         );
+    }
+
+    /**
+     * Display full details for each vulnerability.
+     *
+     * @param  array<int, Vulnerability>  $vulnerabilities
+     */
+    private function displayDetailedFindings(array $vulnerabilities): void
+    {
+        $sorted = $this->sortBySeverity($vulnerabilities);
+
+        $this->components->info('Detailed Findings');
+        $this->newLine();
+
+        foreach ($sorted as $index => $vuln) {
+            $number = $index + 1;
+            $this->line("  <fg=cyan;options=bold>━━━ #{$number}: {$vuln->type->label()} ━━━</>");
+            $this->line("  <fg=gray>Location:</> <fg=cyan>{$vuln->location}:{$vuln->line}</>");
+            $this->line("  <fg=gray>Severity:</> {$vuln->severity->label()}");
+            $this->newLine();
+            $this->line('  <fg=white;options=bold>Description:</>');
+
+            foreach (explode("\n", wordwrap($vuln->description, 100)) as $descLine) {
+                $this->line("    <fg=gray>{$descLine}</>");
+            }
+
+            $this->newLine();
+        }
     }
 
     /**
@@ -376,8 +426,8 @@ final class HackScanCommand extends Command
     private function estimateFileCount(): int
     {
         try {
-            /** @var \Mahdi\HackAuditor\Scanner\FileCollector $collector */
-            $collector = app(\Mahdi\HackAuditor\Scanner\FileCollector::class);
+            /** @var FileCollector $collector */
+            $collector = app(FileCollector::class);
 
             return $collector->collect()->count();
         } catch (\Throwable) {
@@ -394,6 +444,6 @@ final class HackScanCommand extends Command
             return $description;
         }
 
-        return mb_substr($description, 0, $maxLength - 3) . '...';
+        return mb_substr($description, 0, $maxLength - 3).'...';
     }
 }
