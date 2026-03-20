@@ -44,13 +44,43 @@ No API key. No configuration. No setup. Just run it and watch AI tear apart a vu
 
 The demo ships with intentionally vulnerable code so you can see exactly what a real scan looks like before pointing it at your own app.
 
+## Setup for Real Scans
+
+Before running `hack:scan` or `hack:ctf` against your own code, connect an AI provider:
+
+**1. Install Laravel AI** (if not already):
+
+```bash
+php artisan install:ai
+```
+
+**2. Add your API key to `.env`** — pick one provider:
+
+```env
+# OpenAI
+OPENAI_API_KEY=sk-your-key-here
+
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+
+# Gemini
+GEMINI_API_KEY=your-key-here
+```
+
+**3. Set your default provider** in `config/ai.php` (created by `install:ai`), or the package will use whatever you set as the default.
+
+**4. Optionally override for this package only** in `.env`:
+
+```env
+HACK_AUDITOR_AI_PROVIDER=anthropic
+HACK_AUDITOR_AI_MODEL=claude-sonnet-4-5-20250514
+```
+
 ## Scan Your Actual App
 
 ```bash
 php artisan hack:scan
 ```
-
-Make sure [Laravel AI](https://laravel.com/docs/ai) is configured with your preferred provider (OpenAI, Anthropic, Gemini, etc.) before running a real scan.
 
 ### Options
 
