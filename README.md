@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://packagist.org/packages/mahdisphp/laravel-hack-auditor"><img src="https://img.shields.io/packagist/v/mahdisphp/laravel-hack-auditor.svg?style=flat-square" alt="Latest Version"></a>
   <a href="https://packagist.org/packages/mahdisphp/laravel-hack-auditor"><img src="https://img.shields.io/packagist/dt/mahdisphp/laravel-hack-auditor.svg?style=flat-square" alt="Total Downloads"></a>
-  <a href="https://github.com/mahdi-salmanzade/laravel-ai-security"><img src="https://img.shields.io/github/stars/mahdi-salmanzade/laravel-ai-security?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/mahdi-salmanzade/laravel-hack-auditor"><img src="https://img.shields.io/github/stars/mahdi-salmanzade/laravel-hack-auditor?style=flat-square" alt="Stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square" alt="License"></a>
 </p>
 
@@ -319,7 +319,7 @@ Please make sure your PR includes tests and follows the existing code style.
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=mahdi-salmanzade/laravel-ai-security&type=Date)](https://star-history.com/#mahdi-salmanzade/laravel-ai-security&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=mahdi-salmanzade/laravel-hack-auditor&type=Date)](https://star-history.com/#mahdi-salmanzade/laravel-hack-auditor&Date)
 
 ## License
 

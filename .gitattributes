@@ -1,0 +1,8 @@
+/tests            export-ignore
+/.editorconfig    export-ignore
+/.gitignore       export-ignore
+/phpstan.neon     export-ignore
+/pint.json        export-ignore
+/CHANGELOG.md     export-ignore
+/SCAN_RESULTS.md  export-ignore
+/art              export-ignore
