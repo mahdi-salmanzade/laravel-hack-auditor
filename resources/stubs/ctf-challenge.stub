@@ -1,0 +1,11 @@
+<?php
+/**
+ * CTF Challenge: {{title}}
+ * Category: {{category}}
+ * Difficulty: {{difficulty}}
+ *
+ * Find the security vulnerability and capture the flag!
+ * The flag is hidden somewhere in this application...
+ */
+
+{{code}}

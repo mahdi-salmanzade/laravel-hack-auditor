@@ -1,0 +1,53 @@
+{
+    "name": "mahdisphp/laravel-hack-auditor",
+    "description": "AI-powered security auditor & CTF generator for Laravel. Watch AI hack your app in 15 seconds.",
+    "keywords": ["laravel", "security", "audit", "ctf", "ai", "vulnerability", "scanner", "hacking", "penetration-testing"],
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "Mahdi Abazar Salmanzadeh",
+            "email": "mahdi@mindzone.ae"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "laravel/ai": "^0.1|^0.2|^0.3|^1.0",
+        "illuminate/support": "^12.0|^13.0",
+        "illuminate/console": "^12.0|^13.0",
+        "illuminate/database": "^12.0|^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^8.0|^9.0|^10.0",
+        "pestphp/pest": "^2.0|^3.0",
+        "laravel/pint": "^1.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Mahdi\\HackAuditor\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Mahdi\\HackAuditor\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Mahdi\\HackAuditor\\HackAuditorServiceProvider"
+            ],
+            "aliases": {
+                "HackAuditor": "Mahdi\\HackAuditor\\Facades\\HackAuditor"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    }
+}
