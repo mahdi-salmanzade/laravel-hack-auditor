@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\Support;
 
+use Mahdi\HackAuditor\AI\AIAdapter;
+use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 
 final class ShareHelper
@@ -35,7 +37,7 @@ final class ShareHelper
             $hashtagString,
         ]);
 
-        return 'https://twitter.com/intent/tweet?text=' . rawurlencode($tweet);
+        return 'https://twitter.com/intent/tweet?text='.rawurlencode($tweet);
     }
 
     /**
@@ -57,8 +59,8 @@ final class ShareHelper
             '',
             '## Vulnerability Summary',
             '',
-            "| Severity | Count |",
-            "|----------|-------|",
+            '| Severity | Count |',
+            '|----------|-------|',
             "| \xF0\x9F\x94\xB4 Critical | {$report->criticalCount()} |",
             "| \xF0\x9F\x9F\xA0 High | {$report->highCount()} |",
             "| \xF0\x9F\x9F\xA1 Medium | {$report->mediumCount()} |",
@@ -69,6 +71,60 @@ final class ShareHelper
         ];
 
         return implode("\n", $lines);
+    }
+
+    /**
+     * Generate a punchy tweet using AI based on actual scan results.
+     *
+     * Falls back to a template-based tweet if AI is unavailable.
+     */
+    public function generateTweet(VulnerabilityReport $report, AIAdapter $ai, PromptBuilder $promptBuilder): string
+    {
+        if (! config('hack-auditor.share.ai_tweets', true)) {
+            return $this->templateTweet($report);
+        }
+
+        $topFinding = '';
+
+        if (count($report->vulnerabilities) > 0) {
+            $topFinding = $report->vulnerabilities[0]->description;
+        }
+
+        try {
+            $systemPrompt = $promptBuilder->tweetSystemPrompt();
+            $userPrompt = $promptBuilder->tweetUserPrompt(
+                $report->overallScore,
+                $report->totalCount(),
+                $report->criticalCount(),
+                $report->highCount(),
+                $topFinding,
+            );
+
+            $tweet = trim($ai->send($systemPrompt, $userPrompt));
+
+            // Strip quotes if AI wraps the tweet in them
+            $tweet = trim($tweet, '"\'');
+
+            if (mb_strlen($tweet) > 280) {
+                $tweet = mb_substr($tweet, 0, 277).'...';
+            }
+
+            return $tweet;
+        } catch (\Throwable) {
+            return $this->templateTweet($report);
+        }
+    }
+
+    /**
+     * Generate a template-based fallback tweet without AI.
+     */
+    public function templateTweet(VulnerabilityReport $report): string
+    {
+        $critical = $report->criticalCount() > 0
+            ? " ({$report->criticalCount()} critical)"
+            : '';
+
+        return "Just scanned my Laravel app with hack-auditor. Score: {$report->overallScore}/100. Found {$report->totalCount()} vulnerabilities{$critical}. Time to fix some things.";
     }
 
     /**
@@ -88,18 +144,18 @@ final class ShareHelper
 
         $lines = [
             "\xE2\x94\x8C{$hr}\xE2\x94\x90",
-            "\xE2\x94\x82" . $this->centerText("\xF0\x9F\x94\x93 Hack Auditor Scan Results", $innerWidth) . "\xE2\x94\x82",
+            "\xE2\x94\x82".$this->centerText("\xF0\x9F\x94\x93 Hack Auditor Scan Results", $innerWidth)."\xE2\x94\x82",
             "\xE2\x94\x9C{$hr}\xE2\x94\xA4",
-            "\xE2\x94\x82" . $this->padRight("  Security Score: {$score}/100", $innerWidth) . "\xE2\x94\x82",
-            "\xE2\x94\x82" . $this->padRight("  Vulnerabilities Found: {$total}", $innerWidth) . "\xE2\x94\x82",
+            "\xE2\x94\x82".$this->padRight("  Security Score: {$score}/100", $innerWidth)."\xE2\x94\x82",
+            "\xE2\x94\x82".$this->padRight("  Vulnerabilities Found: {$total}", $innerWidth)."\xE2\x94\x82",
             "\xE2\x94\x9C{$hr}\xE2\x94\xA4",
-            "\xE2\x94\x82" . $this->padRight("  \xF0\x9F\x94\xB4 Critical: {$critical}", $innerWidth) . "\xE2\x94\x82",
-            "\xE2\x94\x82" . $this->padRight("  \xF0\x9F\x9F\xA0 High:     {$high}", $innerWidth) . "\xE2\x94\x82",
-            "\xE2\x94\x82" . $this->padRight("  \xF0\x9F\x9F\xA1 Medium:   {$medium}", $innerWidth) . "\xE2\x94\x82",
-            "\xE2\x94\x82" . $this->padRight("  \xF0\x9F\x9F\xA2 Low:      {$low}", $innerWidth) . "\xE2\x94\x82",
+            "\xE2\x94\x82".$this->padRight("  \xF0\x9F\x94\xB4 Critical: {$critical}", $innerWidth)."\xE2\x94\x82",
+            "\xE2\x94\x82".$this->padRight("  \xF0\x9F\x9F\xA0 High:     {$high}", $innerWidth)."\xE2\x94\x82",
+            "\xE2\x94\x82".$this->padRight("  \xF0\x9F\x9F\xA1 Medium:   {$medium}", $innerWidth)."\xE2\x94\x82",
+            "\xE2\x94\x82".$this->padRight("  \xF0\x9F\x9F\xA2 Low:      {$low}", $innerWidth)."\xE2\x94\x82",
             "\xE2\x94\x9C{$hr}\xE2\x94\xA4",
-            "\xE2\x94\x82" . $this->centerText('Share your results!', $innerWidth) . "\xE2\x94\x82",
-            "\xE2\x94\x82" . $this->centerText('php artisan hack:share', $innerWidth) . "\xE2\x94\x82",
+            "\xE2\x94\x82".$this->centerText('Share your results!', $innerWidth)."\xE2\x94\x82",
+            "\xE2\x94\x82".$this->centerText('php artisan hack:share', $innerWidth)."\xE2\x94\x82",
             "\xE2\x94\x94{$hr}\xE2\x94\x98",
         ];
 
@@ -116,7 +172,7 @@ final class ShareHelper
         $leftPad = (int) floor($padding / 2);
         $rightPad = (int) ceil($padding / 2);
 
-        return str_repeat(' ', $leftPad) . $text . str_repeat(' ', $rightPad);
+        return str_repeat(' ', $leftPad).$text.str_repeat(' ', $rightPad);
     }
 
     /**
@@ -127,7 +183,7 @@ final class ShareHelper
         $visibleLength = $this->visibleLength($text);
         $padding = max(0, $width - $visibleLength);
 
-        return $text . str_repeat(' ', $padding);
+        return $text.str_repeat(' ', $padding);
     }
 
     /**

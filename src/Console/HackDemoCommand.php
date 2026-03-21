@@ -65,21 +65,25 @@ final class HackDemoCommand extends Command
     {
         $this->clearScreen();
         $this->displayBanner();
+
+        $this->line('');
+        $this->line('  <fg=gray>target</>   InsecureController.php (12 vuln types)');
+        $this->line('  <fg=gray>engine</>   local demo — no API key needed');
+        $this->line('');
+
         $this->animateSteps();
-        $this->newLine();
 
         $report = $this->buildHardcodedReport($demoFile);
 
+        $this->line('');
         $this->displayScore($report->overallScore);
-        $this->newLine();
-        $this->line("  <fg=gray>{$report->summary}</>");
-        $this->newLine();
+        $this->line('');
         $this->displayVulnerabilityTable($report);
-        $this->newLine();
+        $this->line('');
         $this->displayStats($report);
-        $this->newLine();
+        $this->line('');
         $this->displayWarningBox();
-        $this->newLine();
+        $this->line('');
         $this->displaySharePrompt();
     }
 
@@ -96,12 +100,18 @@ final class HackDemoCommand extends Command
      */
     private function displayBanner(): void
     {
-        $this->newLine();
-        $this->line('<fg=red>╔══════════════════════════════════════════╗</>');
-        $this->line('<fg=red>║</>   <options=bold>🔓 HACK AUDITOR — AI Security Scan</>    <fg=red>║</>');
-        $this->line('<fg=red>║</>   <fg=gray>"Hacking your Laravel app..."</>          <fg=red>║</>');
-        $this->line('<fg=red>╚══════════════════════════════════════════╝</>');
-        $this->newLine();
+        $bannerPath = dirname(__DIR__, 2).'/resources/stubs/banner.stub';
+
+        if (file_exists($bannerPath)) {
+            $lines = explode("\n", trim(file_get_contents($bannerPath)));
+            $this->line('');
+            foreach ($lines as $line) {
+                $this->line('  <fg=red>'.$line.'</>');
+            }
+        } else {
+            $this->line('');
+            $this->line('  <fg=red>HACK AUDITOR</>');
+        }
     }
 
     /**
@@ -109,12 +119,14 @@ final class HackDemoCommand extends Command
      */
     private function animateSteps(): void
     {
-        /** @var array<int, array{emoji: string, message: string, delay: int}> $steps */
+        /** @var array<int, array{message: string, color: string, delay: int}> $steps */
         $steps = [
-            ['emoji' => '⚡', 'message' => 'Initializing AI security engine...', 'delay' => 800_000],
-            ['emoji' => '🔍', 'message' => 'Parsing routes and controllers...', 'delay' => 1_200_000],
-            ['emoji' => '🧠', 'message' => 'Running vulnerability analysis...', 'delay' => 1_500_000],
-            ['emoji' => '💀', 'message' => 'Found critical vulnerabilities!', 'delay' => 500_000],
+            ['message' => 'Loading vulnerable controller...', 'color' => 'cyan', 'delay' => 600_000],
+            ['message' => 'Mapping attack surface...', 'color' => 'cyan', 'delay' => 800_000],
+            ['message' => 'Exploiting logic flaws...', 'color' => 'yellow', 'delay' => 1_200_000],
+            ['message' => 'Testing injection vectors...', 'color' => 'yellow', 'delay' => 1_000_000],
+            ['message' => 'Extracting credentials...', 'color' => 'red', 'delay' => 800_000],
+            ['message' => 'Full compromise achieved — 12 vulnerabilities', 'color' => 'red', 'delay' => 400_000],
         ];
 
         $quick = (bool) $this->option('quick');
@@ -124,8 +136,8 @@ final class HackDemoCommand extends Command
                 usleep($step['delay']);
             }
 
-            $color = $step['emoji'] === '💀' ? 'red' : 'cyan';
-            $this->line("  <fg={$color}>{$step['emoji']} {$step['message']}</>");
+            $symbol = $step['color'] === 'red' ? '!' : '>';
+            $this->line("  <fg={$step['color']}>{$symbol}</> {$step['message']}");
         }
     }
 
@@ -256,18 +268,18 @@ final class HackDemoCommand extends Command
     }
 
     /**
-     * Display the overall security score with large red formatting.
+     * Display the overall security score with dramatic formatting.
      */
     private function displayScore(int $score): void
     {
-        $this->line('  <fg=red;options=bold>╔═══════════════════════╗</>');
-        $this->line('  <fg=red;options=bold>║   Security Score      ║</>');
-        $this->line("  <fg=red;options=bold>║       {$score}/100            ║</>");
-        $this->line('  <fg=red;options=bold>╚═══════════════════════╝</>');
+        $this->line('  <fg=red;options=bold>╔══════════════════════════════════════════════╗</>');
+        $this->line("  <fg=red;options=bold>║         SECURITY SCORE:  {$score}/100               ║</>");
+        $this->line('  <fg=red;options=bold>║    CRITICALLY INSECURE — FULL COMPROMISE     ║</>');
+        $this->line('  <fg=red;options=bold>╚══════════════════════════════════════════════╝</>');
     }
 
     /**
-     * Display the vulnerability results as a styled console table.
+     * Display the top 6 vulnerabilities with "...and N more" for GIF brevity.
      */
     private function displayVulnerabilityTable(VulnerabilityReport $report): void
     {
@@ -279,21 +291,27 @@ final class HackDemoCommand extends Command
             fn (Vulnerability $a, Vulnerability $b): int => $this->severityOrder($b->severity) <=> $this->severityOrder($a->severity),
         );
 
+        $top = array_slice($sorted, 0, 6);
+        $remaining = count($sorted) - 6;
+
         $rows = [];
-        foreach ($sorted as $index => $vuln) {
+        foreach ($top as $index => $vuln) {
             $rows[] = [
                 '<fg=gray>'.($index + 1).'</>',
                 $vuln->severity->label(),
                 "<options=bold>{$vuln->type->label()}</>",
-                "<fg=cyan>{$vuln->location}:{$vuln->line}</>",
-                $this->truncate($vuln->description, 50),
+                "<fg=cyan>:{$vuln->line}</>",
             ];
         }
 
         $this->table(
-            ['<options=bold>#</>', '<options=bold>Severity</>', '<options=bold>Type</>', '<options=bold>Location:Line</>', '<options=bold>Description</>'],
+            ['<options=bold>#</>', '<options=bold>Severity</>', '<options=bold>Type</>', '<options=bold>Line</>'],
             $rows,
         );
+
+        if ($remaining > 0) {
+            $this->line("  <fg=gray>...and {$remaining} more vulnerabilities</>");
+        }
     }
 
     /**
@@ -311,44 +329,37 @@ final class HackDemoCommand extends Command
     }
 
     /**
-     * Display the dramatic styled warning box.
+     * Display the call-to-action warning box.
      */
     private function displayWarningBox(): void
     {
-        $this->line('<fg=red>┌─────────────────────────────────────────────────┐</>');
-        $this->line('<fg=red>│</>  🔴 <fg=red;options=bold>CRITICAL:</> Your app would be hacked in       <fg=red>│</>');
-        $this->line('<fg=red>│</>     production within minutes.                   <fg=red>│</>');
-        $this->line('<fg=red>│</>                                                  <fg=red>│</>');
-        $this->line('<fg=red>│</>  🛡️  Run `<fg=cyan>php artisan hack:scan</>` on YOUR         <fg=red>│</>');
-        $this->line('<fg=red>│</>     actual code to find real vulnerabilities      <fg=red>│</>');
-        $this->line('<fg=red>└─────────────────────────────────────────────────┘</>');
+        $this->line('  <fg=red;options=bold>Your app would be hacked in production within minutes.</>');
+        $this->line('');
+        $this->line('  Run <fg=cyan>php artisan hack:scan</> on YOUR code to find real vulnerabilities.');
     }
 
     /**
-     * Display the share-on-X prompt and optionally copy to clipboard.
+     * Display the share tweet and auto-copy to clipboard.
      */
     private function displaySharePrompt(): void
     {
-        $tweet = <<<'TWEET'
-        🔓 Just watched AI hack my Laravel app in 15 seconds.
-        Found 12 vulnerabilities in one controller.
+        $tweetText = "Just watched AI hack my Laravel app in 15 seconds.\n"
+            ."12 vulnerabilities. Score: 8/100.\n"
+            ."\n"
+            ."composer require mahdisphp/laravel-hack-auditor\n"
+            ."php artisan hack:demo\n"
+            ."\n"
+            .'#Laravel #Security';
 
-        php artisan hack:demo
+        $this->line('  <fg=cyan;options=bold>Share your results:</>');
+        $this->line('');
 
-        mahdisphp/laravel-hack-auditor — the scariest package of 2026.
-        #LaravelSecurity #HackAuditor
-        TWEET;
-
-        $tweetText = implode("\n", array_map('ltrim', explode("\n", $tweet)));
-
-        $this->line('<fg=cyan;options=bold>📢 Share your results:</>');
-        $this->newLine();
-        $this->line("<fg=gray>{$tweetText}</>");
-        $this->newLine();
-
-        if ($this->input->isInteractive() && $this->confirm('→ Copy this tweet?', false)) {
-            $this->copyToClipboard($tweetText);
+        foreach (explode("\n", $tweetText) as $tweetLine) {
+            $this->line("  <fg=gray>{$tweetLine}</>");
         }
+
+        $this->line('');
+        $this->copyToClipboard($tweetText);
     }
 
     /**
@@ -371,9 +382,7 @@ final class HackDemoCommand extends Command
         if ($process !== null && $process !== false) {
             fwrite($process, $text);
             pclose($process);
-            $this->components->info('Copied to clipboard!');
-        } else {
-            $this->components->warn('Could not copy to clipboard. Copy the text above manually.');
+            $this->line('  <fg=green>Copied to clipboard.</>');
         }
     }
 

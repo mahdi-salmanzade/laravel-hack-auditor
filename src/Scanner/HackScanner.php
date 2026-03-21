@@ -21,6 +21,8 @@ final class HackScanner implements ScannerInterface
         private readonly PromptBuilder $promptBuilder,
         private readonly ResponseParser $responseParser,
         private readonly AIAdapter $aiAdapter,
+        private readonly ?RouteAnalyzer $routeAnalyzer = null,
+        private readonly ?RuntimeIntrospector $runtimeIntrospector = null,
     ) {}
 
     /**
@@ -106,16 +108,312 @@ final class HackScanner implements ScannerInterface
     /**
      * Send a batch of files to the AI for security analysis.
      *
+     * When a RouteAnalyzer is available, injects middleware context, routed
+     * method names, and FormRequest file contents for controller files to
+     * help the AI avoid false positives.
+     *
      * @param  array<int, array{path: string, content: string, type: string}>  $files
      */
     private function analyzeFiles(array $files): VulnerabilityReport
     {
+        $this->injectRouteContext($files);
+        $this->injectRoutedMethods($files);
+        $this->injectFormRequestContext($files);
+        $this->injectModelContext($files);
+
         $systemPrompt = $this->promptBuilder->systemPrompt();
         $userPrompt = $this->promptBuilder->userPrompt($files);
 
         $response = $this->aiAdapter->send($systemPrompt, $userPrompt);
 
         return $this->responseParser->parse($response);
+    }
+
+    /**
+     * Inject route middleware context for controller files in the batch.
+     *
+     * Prefers RuntimeIntrospector (authoritative, uses Laravel Router) over
+     * RouteAnalyzer (static file parsing) when available.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $files
+     */
+    private function injectRouteContext(array $files): void
+    {
+        if ($this->runtimeIntrospector === null && $this->routeAnalyzer === null) {
+            return;
+        }
+
+        $allRouteContext = [];
+
+        foreach ($files as $file) {
+            if ($file['type'] !== 'controller') {
+                continue;
+            }
+
+            $className = $this->extractClassName($file['content']);
+
+            if ($className === null) {
+                continue;
+            }
+
+            try {
+                // Prefer RuntimeIntrospector for authoritative middleware resolution
+                $routes = $this->runtimeIntrospector !== null
+                    ? $this->runtimeIntrospector->getRouteMiddleware($className)
+                    : $this->routeAnalyzer->analyze($className);
+
+                foreach ($routes as $route => $middleware) {
+                    $allRouteContext[$route] = $middleware;
+                }
+            } catch (\Throwable) {
+                // Route analysis is best-effort — skip on failure
+            }
+        }
+
+        if ($allRouteContext !== []) {
+            $this->promptBuilder->withRouteContext($allRouteContext);
+        }
+    }
+
+    /**
+     * Inject routed method names for controller files in the batch.
+     *
+     * Prefers RuntimeIntrospector over RouteAnalyzer when available.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $files
+     */
+    private function injectRoutedMethods(array $files): void
+    {
+        if ($this->runtimeIntrospector === null && $this->routeAnalyzer === null) {
+            return;
+        }
+
+        $allRoutedMethods = [];
+
+        foreach ($files as $file) {
+            if ($file['type'] !== 'controller') {
+                continue;
+            }
+
+            $className = $this->extractClassName($file['content']);
+
+            if ($className === null) {
+                continue;
+            }
+
+            try {
+                $methods = $this->runtimeIntrospector !== null
+                    ? $this->runtimeIntrospector->getRoutedMethods($className)
+                    : $this->routeAnalyzer->getRoutedMethods($className);
+
+                foreach ($methods as $method => $route) {
+                    $allRoutedMethods[$method] = $route;
+                }
+            } catch (\Throwable) {
+                // Route analysis is best-effort
+            }
+        }
+
+        if ($allRoutedMethods !== []) {
+            $this->promptBuilder->withRoutedMethods($allRoutedMethods);
+        }
+    }
+
+    /**
+     * Inject FormRequest file contents for controller files in the batch.
+     *
+     * Parses controller type hints to find FormRequest classes, reads their
+     * source files, and adds them to the prompt context so the AI can check
+     * authorize() and rules() methods before flagging false positives.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $files
+     */
+    private function injectFormRequestContext(array $files): void
+    {
+        $formRequests = [];
+        $seen = [];
+
+        foreach ($files as $file) {
+            if ($file['type'] !== 'controller') {
+                continue;
+            }
+
+            $requestClasses = $this->extractFormRequestTypeHints($file['content']);
+
+            foreach ($requestClasses as $fqcn) {
+                if (isset($seen[$fqcn])) {
+                    continue;
+                }
+
+                $seen[$fqcn] = true;
+                $filePath = $this->resolveClassPath($fqcn);
+
+                if ($filePath === null || ! file_exists($filePath)) {
+                    continue;
+                }
+
+                $basePath = base_path().DIRECTORY_SEPARATOR;
+                $relativePath = str_starts_with($filePath, $basePath)
+                    ? substr($filePath, strlen($basePath))
+                    : $filePath;
+
+                $formRequests[] = [
+                    'path' => $relativePath,
+                    'content' => (string) file_get_contents($filePath),
+                ];
+            }
+        }
+
+        if ($formRequests !== []) {
+            $this->promptBuilder->withFormRequestContext($formRequests);
+        }
+    }
+
+    /**
+     * Inject Eloquent model metadata for models referenced in the batch.
+     *
+     * Uses RuntimeIntrospector to get authoritative model properties ($fillable,
+     * $hidden, $guarded, $casts) so the AI can verify mass assignment and
+     * sensitive data exposure findings against actual model configuration.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $files
+     */
+    private function injectModelContext(array $files): void
+    {
+        if ($this->runtimeIntrospector === null) {
+            return;
+        }
+
+        $modelContext = [];
+
+        foreach ($files as $file) {
+            if ($file['type'] !== 'controller') {
+                continue;
+            }
+
+            $modelClasses = $this->extractModelReferences($file['content']);
+
+            foreach ($modelClasses as $modelClass) {
+                if (isset($modelContext[$modelClass])) {
+                    continue;
+                }
+
+                try {
+                    $info = $this->runtimeIntrospector->getModelInfo($modelClass);
+
+                    if ($info !== null) {
+                        $modelContext[$modelClass] = $info;
+                    }
+                } catch (\Throwable) {
+                    // Model introspection is best-effort
+                }
+            }
+        }
+
+        if ($modelContext !== []) {
+            $this->promptBuilder->withModelContext($modelContext);
+        }
+    }
+
+    /**
+     * Extract Eloquent model class FQCNs referenced in controller code.
+     *
+     * Looks for use statements importing classes from the App\Models namespace.
+     *
+     * @return array<int, string>
+     */
+    private function extractModelReferences(string $content): array
+    {
+        $models = [];
+
+        if (preg_match_all('/use\s+([\w\\\\]+);/', $content, $matches)) {
+            foreach ($matches[1] as $use) {
+                if (str_contains($use, 'Models\\')) {
+                    $models[] = $use;
+                }
+            }
+        }
+
+        return array_values(array_unique($models));
+    }
+
+    /**
+     * Extract FormRequest class FQCNs from controller type hints.
+     *
+     * Parses use statements and method signatures to find type-hinted
+     * parameters that reference FormRequest subclasses.
+     *
+     * @return array<int, string>
+     */
+    private function extractFormRequestTypeHints(string $content): array
+    {
+        // Parse use statements into short name => FQCN map
+        $uses = [];
+
+        if (preg_match_all('/use\s+([\w\\\\]+);/', $content, $matches)) {
+            foreach ($matches[1] as $use) {
+                $parts = explode('\\', $use);
+                $short = end($parts);
+                $uses[$short] = $use;
+            }
+        }
+
+        // Find method parameter type hints that look like FormRequests
+        $formRequests = [];
+
+        if (preg_match_all('/function\s+\w+\s*\(([^)]*)\)/s', $content, $matches)) {
+            foreach ($matches[1] as $params) {
+                if (preg_match_all('/(\w+)\s+\$\w+/', $params, $paramMatches)) {
+                    foreach ($paramMatches[1] as $typeHint) {
+                        if (isset($uses[$typeHint]) && str_contains($uses[$typeHint], 'Requests\\')) {
+                            $formRequests[] = $uses[$typeHint];
+                        }
+                    }
+                }
+            }
+        }
+
+        return array_values(array_unique($formRequests));
+    }
+
+    /**
+     * Resolve a fully-qualified class name to an absolute file path.
+     *
+     * Converts PSR-4 App\ namespace to the app/ directory.
+     */
+    private function resolveClassPath(string $fqcn): ?string
+    {
+        if (! str_starts_with($fqcn, 'App\\')) {
+            return null;
+        }
+
+        $relativePath = str_replace('\\', DIRECTORY_SEPARATOR, $fqcn);
+        $relativePath = 'app'.substr($relativePath, 3);
+
+        return base_path($relativePath.'.php');
+    }
+
+    /**
+     * Extract the fully-qualified class name from PHP source code.
+     */
+    private function extractClassName(string $content): ?string
+    {
+        $namespace = null;
+        $class = null;
+
+        if (preg_match('/namespace\s+([^;]+);/', $content, $match)) {
+            $namespace = trim($match[1]);
+        }
+
+        if (preg_match('/class\s+(\w+)/', $content, $match)) {
+            $class = $match[1];
+        }
+
+        if ($class === null) {
+            return null;
+        }
+
+        return $namespace !== null ? "{$namespace}\\{$class}" : $class;
     }
 
     /**

@@ -6,6 +6,18 @@ namespace Mahdi\HackAuditor\AI;
 
 class PromptBuilder
 {
+    /** @var array<string, array<int, string>> */
+    private array $routeContext = [];
+
+    /** @var array<int, array{path: string, content: string}> */
+    private array $formRequestContext = [];
+
+    /** @var array<string, string> */
+    private array $routedMethods = [];
+
+    /** @var array<string, array{fillable: array<int, string>, hidden: array<int, string>, guarded: array<int, string>, casts: array<string, string>}> */
+    private array $modelContext = [];
+
     /**
      * Build the system prompt for the AI security auditor.
      *
@@ -51,24 +63,133 @@ Return ONLY valid JSON (no markdown fences, no explanation outside JSON) with th
 
 Rules:
 - Be extremely strict. Real vulnerabilities only — no false positives.
+- CRITICAL: Self-check every finding before emitting it. After writing the description, re-read it. If your own analysis concludes the code is actually safe (e.g., "on closer inspection this is not an issue", "fields are explicitly specified", "this is handled"), then DELETE that finding from the vulnerabilities array — do NOT emit it. A finding that contradicts its own description destroys trust in the tool.
+- CRITICAL: Only flag code that is actually exploitable. Do not flag defensive code patterns (in_array checks with fallbacks, explicit field lists, manual whitelists) as vulnerabilities. If the code handles the case safely — even without formal validation — it is not a vulnerability. At most, flag it as Low severity code quality suggestion, never Medium or above.
+- Severity calibration: Critical = RCE, full DB dump, account takeover. High = data breach, privilege escalation. Medium = exploitable issue requiring specific conditions. Low = code quality, defense-in-depth suggestion, not directly exploitable. Do NOT inflate severity. A missing formal validation on a field that already has an in_array check is Low at most.
 - overall_score: 100 = perfectly secure, 0 = critically vulnerable.
 - If no vulnerabilities found, return empty vulnerabilities array and score 100.
 - Every fix must be a real, working Laravel code patch — not pseudocode.
 - line numbers must be accurate based on the provided code.
+- IMPORTANT: If a "Route Middleware Context" section is provided, you MUST use it to determine which middleware is already applied. Do NOT report "Missing Rate Limiting" if any throttle middleware (throttle:*, api) is present on the route — even if the throttle parameters seem permissive. Do NOT report "Authentication Bypass" or "Missing Auth" if auth middleware (auth, auth:sanctum, auth:jwt, auth:api) is present on the route. Routes inside middleware groups inherit the group's middleware — trust the context provided. Re-read the route context for EVERY finding before including it.
+- IMPORTANT: If a "Routed Methods" section is provided, ONLY analyze the methods listed there. Controller methods that are NOT listed have no registered routes — they are dead code and cannot be reached by attackers. Do NOT flag vulnerabilities on unrouted methods.
+- IMPORTANT: Before flagging IDOR (Insecure Direct Object Reference), check whether the controller method type-hints a FormRequest class. If a "FormRequest Context" section is provided, read the authorize() method of each FormRequest. If authorize() performs ownership or permission checks (e.g., comparing $this->user()->id against a model's owner_id, using Gate/Policy, or any non-trivial authorization logic), do NOT flag the method for IDOR — the authorization is handled by the FormRequest. In Laravel, FormRequest::authorize() runs BEFORE the controller method and will abort with 403 if it returns false.
+- IMPORTANT: Before flagging "Mass Assignment", check if the controller uses $request->validated(), $request->only([...]), $request->safe(), or explicitly enumerates fields (e.g., ['name' => $request->name, 'email' => $request->email]). All of these are explicit whitelists and are NOT mass assignment vulnerabilities. Only flag mass assignment when $request->all() or unfiltered input is passed directly to create()/update()/fill().
+- IMPORTANT: Before flagging "Sensitive Data Exposure", check the Model's $hidden property if provided. Fields listed in $hidden are automatically excluded from JSON/array serialization. Do NOT flag exposure of fields that are in $hidden.
 PROMPT;
+    }
+
+    /**
+     * Set route middleware context for the next user prompt.
+     *
+     * @param  array<string, array<int, string>>  $routeContext
+     */
+    public function withRouteContext(array $routeContext): self
+    {
+        $this->routeContext = $routeContext;
+
+        return $this;
+    }
+
+    /**
+     * Set FormRequest file contents for the next user prompt.
+     *
+     * @param  array<int, array{path: string, content: string}>  $formRequests
+     */
+    public function withFormRequestContext(array $formRequests): self
+    {
+        $this->formRequestContext = $formRequests;
+
+        return $this;
+    }
+
+    /**
+     * Set routed method names for the next user prompt.
+     *
+     * @param  array<string, string>  $routedMethods  Method name => route description
+     */
+    public function withRoutedMethods(array $routedMethods): self
+    {
+        $this->routedMethods = $routedMethods;
+
+        return $this;
+    }
+
+    /**
+     * Set Eloquent model metadata for the next user prompt.
+     *
+     * @param  array<string, array{fillable: array<int, string>, hidden: array<int, string>, guarded: array<int, string>, casts: array<string, string>}>  $modelContext  FQCN => metadata
+     */
+    public function withModelContext(array $modelContext): self
+    {
+        $this->modelContext = $modelContext;
+
+        return $this;
     }
 
     /**
      * Build the user prompt containing file contents for analysis.
      *
      * Formats each file's path and content into a structured prompt that the
-     * AI can parse and analyze for security vulnerabilities.
+     * AI can parse and analyze for security vulnerabilities. Includes route
+     * middleware context when available to reduce false positives.
      *
      * @param  array<int, array{path: string, content: string, type: string}>  $files
      */
     public function userPrompt(array $files): string
     {
         $prompt = "Analyze the following Laravel application files for security vulnerabilities:\n\n";
+
+        if ($this->routeContext !== []) {
+            $prompt .= "## Route Middleware Context\nThe following middleware is applied to this controller's routes:\n";
+
+            foreach ($this->routeContext as $route => $middleware) {
+                $middlewareList = implode(', ', $middleware);
+                $prompt .= "- {$route} → {$middlewareList}\n";
+            }
+
+            $prompt .= "\n";
+            $this->routeContext = [];
+        }
+
+        if ($this->routedMethods !== []) {
+            $prompt .= "## Routed Methods\nOnly the following controller methods have registered routes and are reachable:\n";
+
+            foreach ($this->routedMethods as $method => $route) {
+                $prompt .= "- {$method}() → {$route}\n";
+            }
+
+            $prompt .= "\nMethods NOT listed here have NO registered routes and CANNOT be reached by attackers. Do NOT flag them.\n\n";
+            $this->routedMethods = [];
+        }
+
+        if ($this->formRequestContext !== []) {
+            $prompt .= "## FormRequest Context\nThe following FormRequest classes are used by the controller methods being analyzed. Check their authorize() method before flagging IDOR, and check their rules() method before flagging Missing Validation:\n\n";
+
+            foreach ($this->formRequestContext as $formRequest) {
+                $prompt .= "### File: {$formRequest['path']}\n```php\n{$formRequest['content']}\n```\n\n";
+            }
+
+            $this->formRequestContext = [];
+        }
+
+        if ($this->modelContext !== []) {
+            $prompt .= "## Eloquent Model Context\nThe following model metadata is authoritative (read from the actual Model classes at runtime). Use this to verify mass assignment, sensitive data exposure, and other model-related findings:\n";
+
+            foreach ($this->modelContext as $modelClass => $info) {
+                $prompt .= "\n### {$modelClass}\n";
+                $prompt .= '- $fillable: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['fillable']))."]\n";
+                $prompt .= '- $hidden: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['hidden']))."]\n";
+                $prompt .= '- $guarded: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['guarded']))."]\n";
+
+                if ($info['casts'] !== []) {
+                    $castPairs = array_map(fn (string $k, string $v): string => "'{$k}' => '{$v}'", array_keys($info['casts']), array_values($info['casts']));
+                    $prompt .= '- $casts: ['.implode(', ', $castPairs)."]\n";
+                }
+            }
+
+            $prompt .= "\nDo NOT flag mass assignment if \$fillable is properly scoped. Do NOT flag sensitive data exposure for fields in \$hidden.\n\n";
+            $this->modelContext = [];
+        }
 
         foreach ($files as $file) {
             $prompt .= "### File: {$file['path']}\n```php\n{$file['content']}\n```\n\n";
@@ -141,6 +262,31 @@ Generate a CTF challenge for the following vulnerability type in a Laravel appli
 **Flag to embed:** {$flag}
 
 Create a realistic, self-contained Laravel code snippet that contains this vulnerability type and can be exploited by participants.
+PROMPT;
+    }
+
+    /**
+     * Build the system prompt for generating viral developer tweets about scan results.
+     */
+    public function tweetSystemPrompt(): string
+    {
+        return <<<'PROMPT'
+You are a developer who just ran a security scan on your Laravel app. Write a single tweet (max 250 characters) sharing your results. Be punchy, slightly shocked or humbled, developer-audience. Use the actual findings — not generic marketing speak. Include the score. No hashtags. No emojis. Short sentences. End with a subtle nudge to try it.
+PROMPT;
+    }
+
+    /**
+     * Build the user prompt for tweet generation with actual scan data.
+     */
+    public function tweetUserPrompt(int $score, int $total, int $critical, int $high, string $topFinding): string
+    {
+        return <<<PROMPT
+Generate a tweet about these security scan results:
+- Score: {$score}/100
+- Total vulnerabilities: {$total} ({$critical} critical, {$high} high)
+- Most interesting finding: {$topFinding}
+
+Write ONE tweet, max 250 characters. Real findings, not marketing. Humble/shocked tone.
 PROMPT;
     }
 

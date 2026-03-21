@@ -7,6 +7,7 @@ namespace Mahdi\HackAuditor;
 use Illuminate\Contracts\Container\Container;
 use Mahdi\HackAuditor\CTF\CTFGenerator;
 use Mahdi\HackAuditor\Models\ScanResult;
+use Mahdi\HackAuditor\Report\HtmlReportGenerator;
 use Mahdi\HackAuditor\Scanner\HackScanner;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 
@@ -56,6 +57,19 @@ final class HackAuditorManager
     public function generateCTF(string $type, ?string $code = null): string
     {
         return $this->ctfGenerator->generate($type, $code);
+    }
+
+    /**
+     * Generate an HTML security report from a vulnerability report.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    public function generateReport(VulnerabilityReport $report, array $meta = []): string
+    {
+        /** @var HtmlReportGenerator $generator */
+        $generator = $this->container->make(HtmlReportGenerator::class);
+
+        return $generator->generate($report, $meta);
     }
 
     /**

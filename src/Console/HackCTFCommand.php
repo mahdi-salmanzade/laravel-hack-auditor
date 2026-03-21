@@ -57,10 +57,14 @@ final class HackCTFCommand extends Command
     private function displayBanner(): void
     {
         $this->newLine();
-        $this->line('<fg=cyan>╔══════════════════════════════════════════╗</>');
-        $this->line('<fg=cyan>║</>  <options=bold>🏴 HACK AUDITOR — CTF Generator</>         <fg=cyan>║</>');
-        $this->line('<fg=cyan>║</>  <fg=gray>Learn security by exploiting it</>.         <fg=cyan>║</>');
-        $this->line('<fg=cyan>╚══════════════════════════════════════════╝</>');
+        $this->line('<fg=cyan;options=bold>██╗░░██╗░█████╗░░█████╗░██╗░░██╗  ░█████╗░██╗░░░██╗██████╗░██╗████████╗░█████╗░██████╗░</>');
+        $this->line('<fg=cyan;options=bold>██║░░██║██╔══██╗██╔══██╗██║░██╔╝  ██╔══██╗██║░░░██║██╔══██╗██║╚══██╔══╝██╔══██╗██╔══██╗</>');
+        $this->line('<fg=cyan;options=bold>███████║███████║██║░░╚═╝█████═╝░  ███████║██║░░░██║██║░░██║██║░░░██║░░░██║░░██║██████╔╝</>');
+        $this->line('<fg=cyan;options=bold>██╔══██║██╔══██║██║░░██╗██╔═██╗░  ██╔══██║██║░░░██║██║░░██║██║░░░██║░░░██║░░██║██╔══██╗</>');
+        $this->line('<fg=cyan;options=bold>██║░░██║██║░░██║╚█████╔╝██║░╚██╗  ██║░░██║╚██████╔╝██████╔╝██║░░░██║░░░╚█████╔╝██║░░██║</>');
+        $this->line('<fg=cyan;options=bold>╚═╝░░╚═╝╚═╝░░╚═╝░╚════╝░╚═╝░░╚═╝  ╚═╝░░╚═╝░╚═════╝░╚═════╝░╚═╝░░░╚═╝░░░░╚════╝░╚═╝░░╚═╝</>');
+        $this->newLine();
+        $this->line('  <fg=gray>CTF Generator // Learn security by exploiting it.</>');
         $this->newLine();
     }
 

@@ -172,7 +172,7 @@ it('command output contains banner when not using --json flag', function (): voi
     $this->app->instance(AIAdapter::class, $mockAdapter);
 
     $this->artisan('hack:scan')
-        ->expectsOutputToContain('HACK AUDITOR')
+        ->expectsOutputToContain('Collecting files...')
         ->assertSuccessful();
 });
 

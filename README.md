@@ -2,275 +2,142 @@
   <img src="art/banner.jpg" width="700" alt="Laravel Hack Auditor">
 </p>
 
-<p align="center">
-  <strong>Watch AI hack your Laravel app in 15 seconds.</strong>
-</p>
+<h3 align="center">Watch AI hack your Laravel app in 15 seconds.</h3>
 
 <p align="center">
-  <a href="https://packagist.org/packages/mahdisphp/laravel-hack-auditor"><img src="https://img.shields.io/packagist/v/mahdisphp/laravel-hack-auditor.svg?style=flat-square" alt="Latest Version"></a>
-  <a href="https://packagist.org/packages/mahdisphp/laravel-hack-auditor"><img src="https://img.shields.io/packagist/dt/mahdisphp/laravel-hack-auditor.svg?style=flat-square" alt="Total Downloads"></a>
-  <a href="https://github.com/mahdi-salmanzade/laravel-hack-auditor"><img src="https://img.shields.io/github/stars/mahdi-salmanzade/laravel-hack-auditor?style=flat-square" alt="Stars"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square" alt="License"></a>
+  <a href="https://packagist.org/packages/mahdisphp/laravel-hack-auditor"><img src="https://img.shields.io/packagist/v/mahdisphp/laravel-hack-auditor" alt="Latest Version"></a>
+  <a href="https://packagist.org/packages/mahdisphp/laravel-hack-auditor"><img src="https://img.shields.io/packagist/dt/mahdisphp/laravel-hack-auditor" alt="Total Downloads"></a>
+  <a href="https://github.com/mahdi-salmanzade/laravel-hack-auditor"><img src="https://img.shields.io/github/stars/mahdi-salmanzade/laravel-hack-auditor" alt="Stars"></a>
 </p>
 
----
+Watch AI literally hack a vulnerable Laravel controller in front of your eyes — no setup, no API key.
 
-> AI-assisted contextual security analysis for Laravel. Catches the vulnerabilities that static analysis misses — IDOR, auth bypass, missing rate limits, business logic flaws — by understanding your code in context. Plus: generate CTF challenges from your actual codebase.
-
-## Install (30 seconds)
+<p align="center">
+  <img src="art/demo.gif" width="600" alt="hack:demo in action">
+</p>
 
 ```bash
 composer require mahdisphp/laravel-hack-auditor
-```
-
-That's it. One command and you're ready to scan.
-
-**Optional:** If you want to track scan history in your database:
-
-```bash
-php artisan vendor:publish --tag=hack-auditor-migrations
-php artisan migrate
-```
-
-> Migrations are **not** auto-loaded by default. Set `history.enabled` to `true` in your config and publish the migrations to opt in. No surprise tables in your production database from a dev tool.
-
-## Try It Right Now
-
-```bash
 php artisan hack:demo
 ```
 
-No API key. No configuration. No setup. Just run it and watch AI tear apart a vulnerable controller in your terminal.
+That's it. Two commands. Watch 12 vulnerabilities get ripped out of a controller in your terminal.
 
-The demo ships with intentionally vulnerable code so you can see exactly what a real scan looks like before pointing it at your own app.
+---
 
-## Setup for Real Scans
+> We scanned a real production Laravel app (42 controllers). Score: **35/100**. Top finding: a test endpoint returning **real OTP codes** in JSON — full account takeover. [See the full report.](SCAN_RESULTS.md)
 
-Before running `hack:scan` or `hack:ctf` against your own code, connect an AI provider:
+---
 
-**1. Install Laravel AI** (if not already):
+## Four commands. That's the whole package.
 
 ```bash
-php artisan install:ai
+php artisan hack:demo                   # See it in action (no API key)
+php artisan hack:scan                   # Scan YOUR app with AI
+php artisan hack:scan --diff --html     # Scan only changed files, export HTML report
+php artisan hack:ctf sql_injection      # Turn vulns into CTF challenges
+php artisan hack:report --latest        # Generate HTML report from saved scan
 ```
 
-**2. Add your API key to `.env`** — pick one provider:
+**`hack:scan` finds what PHPStan and Snyk can't:**
+- "This endpoint fetches a user by ID but never checks ownership" *(IDOR)*
+- "Admin check reads `is_admin` from the request, not the session" *(Auth bypass)*
+- "Login route has no throttle middleware" *(Brute-forceable)*
+- "Room owner can add any user by ID without consent" *(Design-level access control)*
+
+12 vulnerability types. OWASP Top 10 mapped. Every finding has file, line, explanation, and a copy-paste fix.
+
+### Low false-positive rate
+
+v1.2 reads your actual Laravel runtime — route middleware stacks, FormRequest `authorize()` methods, Eloquent `$fillable`/`$hidden` — and feeds it to the AI before analysis. Self-contradicting findings are auto-suppressed. Unrouted controller methods are skipped. The result: findings you actually need to fix, not noise.
+
+## Quick setup (2 minutes)
+
+```bash
+php artisan install:ai                  # Install Laravel AI
+```
+
+Add one API key to `.env`:
 
 ```env
-# OpenAI
-OPENAI_API_KEY=sk-your-key-here
-
-# Anthropic
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-
-# Gemini
-GEMINI_API_KEY=your-key-here
+ANTHROPIC_API_KEY=sk-ant-your-key-here  # or OPENAI_API_KEY, or GEMINI_API_KEY
 ```
 
-**3. Set your default provider** in `config/ai.php` (created by `install:ai`), or the package will use whatever you set as the default.
-
-**4. Optionally override for this package only** in `.env`:
-
-```env
-HACK_AUDITOR_AI_PROVIDER=anthropic
-HACK_AUDITOR_AI_MODEL=claude-sonnet-4-5-20250514
-```
-
-## Scan Your Actual App
+Scan:
 
 ```bash
 php artisan hack:scan
 ```
 
-### Options
+Done. The package uses whatever provider you configured in Laravel AI. Optionally override just for this package:
 
-| Flag | Description |
+```env
+HACK_AUDITOR_AI_PROVIDER=anthropic
+HACK_AUDITOR_AI_MODEL=claude-opus-4-6
+```
+
+<details>
+<summary><strong>All scan flags</strong></summary>
+
+| Flag | What it does |
 |------|-------------|
-| `--path=app/Http/Controllers` | Scan a specific directory or file instead of the full app |
-| `--severity=High` | Only report vulnerabilities at this severity or above |
-| `--fix` | Include copy-paste fix suggestions for every finding |
-| `--json` | Output raw JSON (perfect for CI/CD pipelines) |
-| `--save` | Persist results to the database for historical tracking |
-| `--force` | Skip confirmation prompt for large scans |
-| `--detailed` | Show full untruncated descriptions in the table |
+| `--path=app/Http/Controllers` | Scan specific directory or file |
+| `--severity=High` | Filter to High+ only |
+| `--fix` | Include fix suggestions |
+| `--json` | JSON output for CI/CD |
+| `--html` | Generate HTML report |
+| `--save` | Save to database |
+| `--force` | Skip confirmation prompt |
+| `--detailed` | Full descriptions in table |
+| `--diff` | Only scan git-changed files (great for CI) |
+| `--base=develop` | Base branch for `--diff` |
+| `--update-baseline` | Save current findings as baseline |
+| `--no-baseline` | Ignore baseline file |
+
+</details>
+
+## Generate CTF challenges from real vulns
+
+Train your team by turning actual findings into Capture The Flag exercises:
 
 ```bash
-# Scan only your controllers
-php artisan hack:scan --path=app/Http/Controllers
-
-# High and Critical only, with fixes
-php artisan hack:scan --severity=High --fix
-
-# JSON output for your CI pipeline
-php artisan hack:scan --json
-
-# Save results and track your security score over time
-php artisan hack:scan --save
+php artisan hack:ctf sql_injection    # By type
+php artisan hack:ctf --from-scan      # From latest scan results
+php artisan hack:ctf --all            # Generate for every finding
 ```
 
-## What It Detects
+Each challenge outputs a ready-to-run directory: README, vulnerable code, solution, flag file, and docker-compose.
 
-12 vulnerability types mapped to the OWASP Top 10 (2021):
-
-| # | Vulnerability | Severity | OWASP Category |
-|---|--------------|----------|----------------|
-| 1 | SQL Injection | Critical | A03:2021 - Injection |
-| 2 | Cross-Site Scripting (XSS) | High | A03:2021 - Injection |
-| 3 | Cross-Site Request Forgery (CSRF) | Medium | A01:2021 - Broken Access Control |
-| 4 | Mass Assignment | High | A04:2021 - Insecure Design |
-| 5 | Insecure Direct Object Reference (IDOR) | High | A01:2021 - Broken Access Control |
-| 6 | Missing Rate Limiting | Medium | A04:2021 - Insecure Design |
-| 7 | Authentication Bypass | Critical | A07:2021 - Auth Failures |
-| 8 | Insecure Deserialization | Critical | A08:2021 - Integrity Failures |
-| 9 | Open Redirect | High | A01:2021 - Broken Access Control |
-| 10 | Sensitive Data Exposure | Critical | A02:2021 - Cryptographic Failures |
-| 11 | Weak Password Hashing | Critical | A02:2021 - Cryptographic Failures |
-| 12 | Missing Input Validation | Medium | A03:2021 - Injection |
-
-Every finding includes the exact file, line number, a plain-English explanation of the risk, and a suggested fix you can copy-paste directly into your code.
-
-### How This Differs From Static Analysis
-
-Tools like PHPStan security rules, Psalm, and Snyk are great at catching pattern-based vulnerabilities (SQL injection via string concatenation, XSS from unescaped output). **Use them.** They're deterministic and don't hallucinate.
-
-Hack Auditor complements those tools by catching **contextual vulnerabilities** that require understanding business logic:
-
-- **IDOR** — "This endpoint fetches a user by ID from the route but never checks ownership"
-- **Auth bypass** — "This admin check reads `is_admin` from the request instead of the authenticated user"
-- **Missing rate limiting** — "Login route has no throttle middleware"
-- **Sensitive data exposure** — "Password field is logged in the auth controller"
-
-AI can reason about these patterns in ways static analysis can't. But AI can also produce false positives. **Review every finding.** This is a development aid, not a replacement for your security pipeline.
-
-## Generate CTF Challenges
-
-Turn your app's real vulnerabilities into hands-on training for your team.
+## HTML reports, git-aware scanning, baselines
 
 ```bash
-# Generate a SQL Injection challenge
-php artisan hack:ctf SqlInjection
-
-# Generate challenges from your latest scan results
-php artisan hack:ctf --from-scan
-
-# Generate a challenge for every finding
-php artisan hack:ctf --all
+php artisan hack:scan --html            # Beautiful dark-themed HTML report
+php artisan hack:scan --diff            # Only scan files changed in your branch
+php artisan hack:scan --update-baseline # Accept current findings as known
+php artisan hack:report --latest        # Regenerate report from saved scan
 ```
 
-Each challenge is a self-contained PHP file with:
-- The vulnerable code (sanitized)
-- A description of what's wrong
-- Hints that progressively reveal the exploit
-- A solution file your team can check against
+The HTML report is a single self-contained file — dark theme, animated score ring, collapsible cards, copy-paste code blocks. Professional enough to attach to a security audit.
 
-Challenges are saved to `storage/hack-auditor/ctf` by default. Change this in your config.
+`--diff` scans only what your PR touches. `--update-baseline` lets teams acknowledge known risks so CI doesn't fail on accepted findings.
 
-## Configuration
-
-Publish the config file and customize everything:
-
-```bash
-php artisan vendor:publish --tag=hack-auditor-config
-```
-
-### AI Provider
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `ai.provider` | `null` | AI provider override (`openai`, `anthropic`, `gemini`, etc.). When `null`, uses your Laravel AI default. |
-| `ai.model` | `null` | Model override. When `null`, uses your Laravel AI default. |
-| `ai.temperature` | `0.3` | Lower = more deterministic analysis. Recommended: `0.1` - `0.5`. |
-| `ai.max_tokens` | `4096` | Maximum tokens per AI response. Increase for very large codebases. |
-| `ai.timeout` | `120` | HTTP timeout in seconds for AI requests. Increase for slower models or large CTF generation. |
-
-### Scan Paths
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `scan.paths` | `['app/Http/Controllers', 'app/Models', 'app/Http/Requests', 'app/Http/Middleware', 'routes']` | Directories to scan (relative to `base_path()`). |
-| `scan.exclude` | `['*/vendor/*', '*/node_modules/*', '*/tests/*']` | Glob patterns to exclude from scanning. |
-| `scan.file_extensions` | `['.php']` | File extensions to include. |
-| `scan.max_file_size_kb` | `500` | Skip files larger than this (KB). |
-| `scan.chunk_size` | `10` | Max files per AI request. Actual chunking is token-aware — large files get their own chunk. |
-| `scan.confirm_above_files` | `20` | Prompt for confirmation when scanning more than this many files. Prevents surprise API bills. Use `--force` to skip. |
-| `scan.sensitive_patterns` | `['.env*', '*.key', '*.pem', 'storage/logs/*']` | **Always excluded.** Safety net to prevent secrets from reaching AI providers. |
-
-### Severity
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `severity.minimum_report` | `Low` | Minimum severity to include in reports. Options: `Critical`, `High`, `Medium`, `Low`. |
-
-### CTF
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `ctf.output_path` | `storage/hack-auditor/ctf` | Where generated CTF challenge files are saved. |
-
-### History
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `history.enabled` | `true` | Persist scan results to the database. |
-| `history.keep_days` | `30` | Auto-delete scan results older than this many days. |
-
-### Sharing
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `share.default_hashtags` | `['#LaravelSecurity', '#HackAuditor', '#CTF']` | Hashtags appended when sharing results. |
-
-## Programmatic Usage
-
-Use the `HackAuditor` facade anywhere in your application:
+## Use it in code
 
 ```php
 use Mahdi\HackAuditor\Facades\HackAuditor;
 
-// Scan your entire app
 $report = HackAuditor::scan();
 
-echo "Security Score: {$report->overallScore}/100";
-echo "Total Vulnerabilities: {$report->totalCount()}";
-echo "Critical Issues: {$report->criticalCount()}";
-
-// Scan a specific file
-$report = HackAuditor::scan('app/Http/Controllers/PaymentController.php');
-
-// Scan a raw code string
-$code = file_get_contents('app/Http/Controllers/AuthController.php');
-$report = HackAuditor::scanCode($code);
-
-// Check individual severity counts
-$report->criticalCount();  // int
-$report->highCount();       // int
-$report->mediumCount();     // int
-$report->lowCount();        // int
-
-// Check for critical issues
 if ($report->hasCritical()) {
-    // Alert your team, block deployment, etc.
+    // Block deployment, alert Slack, panic, etc.
 }
 
-// Export as JSON (great for dashboards)
-$json = $report->toJson();
-
-// Export as array
-$data = $report->toArray();
-
-// Generate a CTF challenge
-$path = HackAuditor::generateCTF('SqlInjection');
-
-// Generate a CTF challenge based on real code
-$path = HackAuditor::generateCTF('MassAssignment', $vulnerableCode);
-
-// Get your latest security score
-$score = HackAuditor::score(); // 0-100
+echo $report->overallScore;    // 0-100
+echo $report->criticalCount(); // int
 ```
 
-### CI/CD Integration
-
-Add this to your GitHub Actions, GitLab CI, or any pipeline:
+<details>
+<summary><strong>CI/CD pipeline example</strong></summary>
 
 ```yaml
 # .github/workflows/security.yml
@@ -281,84 +148,61 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: '8.3'
       - run: composer install --no-interaction
-      - name: Run Security Scan
-        run: php artisan hack:scan --json --severity=High
+      - run: php artisan hack:scan --json --severity=High
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-## Share Your Results
+</details>
 
-After every scan, the package generates a shareable summary:
+<details>
+<summary><strong>All configuration options</strong></summary>
 
-```
-My Laravel app scored 82/100 on security.
-Found 3 vulnerabilities (0 Critical, 1 High, 2 Medium).
-Scanned with Laravel Hack Auditor.
-#LaravelSecurity #HackAuditor #CTF
+```bash
+php artisan vendor:publish --tag=hack-auditor-config
 ```
 
-Post it on X/Twitter, share it with your team, or use it in your security review meetings. The hashtags are configurable in your `hack-auditor.php` config.
+| Option | Default | Description |
+|--------|---------|-------------|
+| `ai.provider` | `null` | AI provider override |
+| `ai.model` | `null` | Model override |
+| `ai.temperature` | `0.3` | Lower = more deterministic |
+| `ai.timeout` | `120` | HTTP timeout in seconds |
+| `scan.paths` | Controllers, Models, Requests, Middleware, routes | What to scan |
+| `scan.confirm_above_files` | `20` | Prompt before large scans |
+| `scan.sensitive_patterns` | `.env*, *.key, *.pem, storage/logs/*` | Always excluded |
+| `history.enabled` | `true` | Save results to database |
+| `ctf.output_path` | `storage/hack-auditor/ctf` | CTF output directory |
 
-## Real-World Scan Results
+Optional database history:
 
-We ran Hack Auditor against a production Laravel backend (42 controllers, magic link auth, social auth, crews, leaderboards) using Anthropic Claude Opus 4.6:
+```bash
+php artisan vendor:publish --tag=hack-auditor-migrations
+php artisan migrate
+```
 
-| Score | Vulnerabilities | Critical | High | Medium | Low |
-|-------|----------------|----------|------|--------|-----|
-| **35/100** | 7 | 1 | 2 | 3 | 1 |
+</details>
 
-Top finding: a test endpoint (`/auth/test-otp`) that returns **real OTP codes** in the JSON response — full account takeover if accessible in production. This is the kind of contextual vulnerability that static analysis tools miss entirely.
+## Security
 
-See the full report: [SCAN_RESULTS.md](SCAN_RESULTS.md)
+This package sends source code to AI providers. Files matching `.env*`, `*.key`, `*.pem`, and `storage/logs/*` are always excluded. Review your provider's data retention policies.
 
-## Security Warning
-
-**This package sends your application's source code to AI providers for analysis.**
-
-- Never run scans on production servers with sensitive business logic.
-- Review the `scan.sensitive_patterns` config to ensure secrets, keys, and certificates are excluded.
-- Files matching `.env*`, `*.key`, `*.pem`, and `storage/logs/*` are excluded by default.
-- Understand your AI provider's data retention policies before scanning proprietary code.
-
-If you discover a security vulnerability in this package itself, please report it responsibly by emailing **mahdi@mindzone.tech** instead of opening a public issue.
+Found a vulnerability in this package? Email **mahdi@mindzone.tech**.
 
 ## Contributing
 
-Contributions are welcome and appreciated.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-detection`)
-3. Write tests for your changes
-4. Ensure all tests pass (`composer test`)
-5. Run the formatter (`vendor/bin/pint`)
-6. Commit your changes (`git commit -m 'Add amazing detection'`)
-7. Push to the branch (`git push origin feature/amazing-detection`)
-8. Open a Pull Request
-
-Please make sure your PR includes tests and follows the existing code style.
-
-## Credits
-
-- **Mahdi Salmanzade**
-- Built with [Laravel AI](https://laravel.com/docs/ai)
-- Powered by the Laravel community
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=mahdi-salmanzade/laravel-hack-auditor&type=Date)](https://star-history.com/#mahdi-salmanzade/laravel-hack-auditor&Date)
+PRs welcome. Run `composer test` and `vendor/bin/pint` before submitting.
 
 ## License
 
-The MIT License (MIT). Please see [LICENSE](LICENSE) for more information.
+MIT — [LICENSE](LICENSE)
 
 ---
 
 <p align="center">
-  <strong>If this package saved you from getting hacked, give it a star.</strong>
+  <strong>If this saved you from getting hacked, star the repo.</strong>
 </p>

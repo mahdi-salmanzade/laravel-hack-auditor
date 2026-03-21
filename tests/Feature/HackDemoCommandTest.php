@@ -9,7 +9,7 @@ it('demo runs successfully without an API key', function (): void {
 
 it('demo output contains the banner', function (): void {
     $this->artisan('hack:demo', ['--quick' => true, '--no-interaction' => true])
-        ->expectsOutputToContain('HACK AUDITOR');
+        ->expectsOutputToContain('InsecureController.php (12 vuln types)');
 });
 
 it('demo output contains the security score 8/100', function (): void {
@@ -21,8 +21,8 @@ it('demo output contains vulnerability types', function (): void {
     $result = $this->artisan('hack:demo', ['--quick' => true, '--no-interaction' => true]);
 
     $result->expectsOutputToContain('SQL Injection')
-        ->expectsOutputToContain('Cross-Site Scripting')
-        ->expectsOutputToContain('Mass Assignment');
+        ->expectsOutputToContain('Authentication Bypass')
+        ->expectsOutputToContain('and 6 more');
 });
 
 it('demo output contains the critical warning box', function (): void {
@@ -78,8 +78,8 @@ it('demo output mentions the hack:scan command', function (): void {
 
 it('demo output contains scanning animation steps', function (): void {
     $this->artisan('hack:demo', ['--quick' => true, '--no-interaction' => true])
-        ->expectsOutputToContain('Initializing AI security engine')
-        ->expectsOutputToContain('Running vulnerability analysis');
+        ->expectsOutputToContain('Loading vulnerable controller...')
+        ->expectsOutputToContain('Exploiting logic flaws...');
 });
 
 it('demo returns success exit code', function (): void {

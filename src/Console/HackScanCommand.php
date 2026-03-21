@@ -5,12 +5,20 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
+use Mahdi\HackAuditor\AI\AIAdapter;
+use Mahdi\HackAuditor\AI\PromptBuilder;
+use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Models\ScanResult;
+use Mahdi\HackAuditor\Report\HtmlReportGenerator;
+use Mahdi\HackAuditor\Scanner\Baseline;
+use Mahdi\HackAuditor\Scanner\CodeExtractor;
 use Mahdi\HackAuditor\Scanner\FileCollector;
+use Mahdi\HackAuditor\Scanner\GitDiffCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 use Mahdi\HackAuditor\Support\SeverityLevel;
+use SplFileInfo;
 
 use function Laravel\Prompts\spin;
 
@@ -26,9 +34,15 @@ final class HackScanCommand extends Command
         {--severity=Low : Minimum severity to report}
         {--fix : Auto-generate fixes}
         {--json : Output as JSON}
+        {--html : Generate an HTML report}
         {--save : Save results to database}
         {--force : Skip confirmation prompt for large scans}
-        {--detailed : Show full descriptions in the table instead of truncating}';
+        {--detailed : Show full descriptions in the table instead of truncating}
+        {--diff : Only scan files changed in the current git branch}
+        {--base= : Base branch for --diff comparison (default: auto-detect main/master)}
+        {--baseline : Apply baseline to suppress known findings (on by default if file exists)}
+        {--no-baseline : Ignore the baseline file}
+        {--update-baseline : Save current findings as the new baseline}';
 
     /**
      * The console command description.
@@ -54,20 +68,26 @@ final class HackScanCommand extends Command
 
         if (! $this->option('json')) {
             $this->displayBanner();
+            $this->line('');
+
+            $provider = config('hack-auditor.ai.provider', 'laravel-ai');
+            $model = config('hack-auditor.ai.model', 'default');
+            $fileCount = $this->estimateFileCount();
+
+            $this->line('  <fg=gray>target</>   '.$fileCount.' files');
+            $this->line('  <fg=gray>engine</>   '.$provider.' / '.$model);
+            $this->line('');
+            $this->line('  <fg=yellow>●</> Collecting files...');
         }
 
         /** @var HackScanner $scanner */
         $scanner = app(HackScanner::class);
 
-        if (! $this->option('json')) {
-            $this->components->info('Collecting files...');
-        }
-
         $path = $this->option('path');
 
         if (! is_string($path) || $path === '') {
             if (! $this->option('json') && ! $this->option('force')) {
-                $fileCount = $this->estimateFileCount();
+                $fileCount = $fileCount ?? $this->estimateFileCount();
                 /** @var int $threshold */
                 $threshold = config('hack-auditor.scan.confirm_above_files', 20);
 
@@ -92,22 +112,31 @@ final class HackScanCommand extends Command
         /** @var VulnerabilityReport $report */
         $report = spin(
             callback: function () use ($scanner, $path): VulnerabilityReport {
+                if ($this->option('diff')) {
+                    return $this->scanDiff($scanner);
+                }
+
                 if (is_string($path) && $path !== '') {
                     return $scanner->scanFile($path);
                 }
 
                 return $scanner->scan();
             },
-            message: 'Analyzing with AI...',
+            message: 'Analyzing files with AI...',
         );
 
         $elapsedMs = (int) ((hrtime(true) - $startTime) / 1_000_000);
         $minimumSeverity = SeverityLevel::fromString((string) $this->option('severity'));
         $filteredVulnerabilities = $this->filterBySeverity($report->vulnerabilities, $minimumSeverity);
+        $filteredVulnerabilities = $this->applyBaseline($filteredVulnerabilities);
 
         if ($this->option('json')) {
             return $this->outputJson($report, $filteredVulnerabilities, $elapsedMs);
         }
+
+        $this->line('  <fg=green>✓</> Scan complete <fg=gray>('.round($elapsedMs / 1000, 1).'s)</>');
+        $this->newLine();
+        $this->displayAnalyzedPaths();
 
         $this->displayFileSummary($report);
         $this->newLine();
@@ -131,9 +160,19 @@ final class HackScanCommand extends Command
             $this->newLine();
         }
 
+        if ($this->option('update-baseline')) {
+            $this->updateBaseline($report);
+        }
+
         if ($this->option('save')) {
             $this->saveResults($report, $elapsedMs);
         }
+
+        if ($this->option('html')) {
+            $this->generateHtmlReport($report, $elapsedMs);
+        }
+
+        $this->displayScanComparison($report);
 
         $this->components->info('Run `<fg=cyan>php artisan hack:ctf</>` to generate CTF challenges from these findings');
 
@@ -145,12 +184,18 @@ final class HackScanCommand extends Command
      */
     private function displayBanner(): void
     {
-        $this->newLine();
-        $this->line('<fg=cyan>╔══════════════════════════════════════════════════╗</>');
-        $this->line('<fg=cyan>║</>  <options=bold>🔥 HACK AUDITOR — AI Security Scanner v1.0</>     <fg=cyan>║</>');
-        $this->line('<fg=cyan>║</>  <fg=gray>"Watch AI hack your Laravel app in 15 seconds."</> <fg=cyan>║</>');
-        $this->line('<fg=cyan>╚══════════════════════════════════════════════════╝</>');
-        $this->newLine();
+        $bannerPath = dirname(__DIR__, 2).'/resources/stubs/banner.stub';
+
+        if (file_exists($bannerPath)) {
+            $lines = explode("\n", trim(file_get_contents($bannerPath)));
+            $this->line('');
+            foreach ($lines as $line) {
+                $this->line('  <fg=red>'.$line.'</>');
+            }
+        } else {
+            $this->line('');
+            $this->line('  <fg=red>HACK AUDITOR</>');
+        }
     }
 
     /**
@@ -421,6 +466,194 @@ final class HackScanCommand extends Command
     }
 
     /**
+     * Scan only files changed in the current git branch.
+     */
+    private function scanDiff(HackScanner $scanner): VulnerabilityReport
+    {
+        $collector = new GitDiffCollector;
+        $baseBranch = $this->option('base');
+
+        if (! is_string($baseBranch) || $baseBranch === '') {
+            /** @var ?string $configBranch */
+            $configBranch = config('hack-auditor.scan.diff_base_branch');
+            $baseBranch = is_string($configBranch) && $configBranch !== '' ? $configBranch : 'main';
+        }
+
+        $files = $collector->getChangedFiles($baseBranch);
+
+        if ($files === []) {
+            return new VulnerabilityReport(
+                vulnerabilities: [],
+                overallScore: 100,
+                summary: "No changed PHP files found compared to {$baseBranch}.",
+                ctfIdea: '',
+            );
+        }
+
+        /** @var CodeExtractor $extractor */
+        $extractor = app(CodeExtractor::class);
+
+        $splFiles = collect($files)->map(fn (string $path): SplFileInfo => new SplFileInfo($path));
+        $chunks = $extractor->chunk($splFiles);
+
+        $reports = [];
+
+        foreach ($chunks as $chunk) {
+            $systemPrompt = app(PromptBuilder::class)->systemPrompt();
+            $userPrompt = app(PromptBuilder::class)->userPrompt($chunk);
+            $response = app(AIAdapter::class)->send($systemPrompt, $userPrompt);
+            $reports[] = app(ResponseParser::class)->parse($response);
+        }
+
+        if (count($reports) === 0) {
+            return new VulnerabilityReport(
+                vulnerabilities: [],
+                overallScore: 100,
+                summary: 'No files analyzed.',
+                ctfIdea: '',
+            );
+        }
+
+        if (count($reports) === 1) {
+            return $reports[0];
+        }
+
+        // Merge reports
+        $allVulns = [];
+        $scoreSum = 0;
+        $summaries = [];
+
+        foreach ($reports as $r) {
+            $allVulns = array_merge($allVulns, $r->vulnerabilities);
+            $scoreSum += $r->overallScore;
+
+            if ($r->summary !== '') {
+                $summaries[] = $r->summary;
+            }
+        }
+
+        return new VulnerabilityReport(
+            vulnerabilities: $allVulns,
+            overallScore: (int) round($scoreSum / count($reports)),
+            summary: implode("\n\n", $summaries),
+            ctfIdea: '',
+        );
+    }
+
+    /**
+     * Apply baseline filtering to suppress known findings.
+     *
+     * @param  array<int, Vulnerability>  $vulnerabilities
+     * @return array<int, Vulnerability>
+     */
+    private function applyBaseline(array $vulnerabilities): array
+    {
+        if ($this->option('no-baseline')) {
+            return $vulnerabilities;
+        }
+
+        $baseline = new Baseline;
+        $baselinePath = config('hack-auditor.scan.baseline_path');
+
+        if (! $baseline->exists(is_string($baselinePath) ? $baselinePath : null)) {
+            return $vulnerabilities;
+        }
+
+        $baseline->load(is_string($baselinePath) ? $baselinePath : null);
+        $result = $baseline->filter($vulnerabilities);
+
+        if ($result['suppressed'] > 0 && ! $this->option('json')) {
+            $newCount = count($result['new']);
+            $this->components->info(
+                "<fg=gray>{$result['suppressed']} findings suppressed by baseline</> ({$newCount} new findings)"
+            );
+        }
+
+        return $result['new'];
+    }
+
+    /**
+     * Save current findings as the new baseline file.
+     */
+    private function updateBaseline(VulnerabilityReport $report): void
+    {
+        $baseline = new Baseline;
+        $baselinePath = config('hack-auditor.scan.baseline_path');
+        $baseline->save($report, is_string($baselinePath) ? $baselinePath : null);
+
+        $this->components->info("Baseline updated with {$report->totalCount()} findings");
+    }
+
+    /**
+     * Generate an HTML report and save it to the configured output path.
+     */
+    private function generateHtmlReport(VulnerabilityReport $report, int $elapsedMs): void
+    {
+        try {
+            /** @var HtmlReportGenerator $generator */
+            $generator = app(HtmlReportGenerator::class);
+
+            $html = $generator->generate($report, [
+                'duration' => round($elapsedMs / 1000, 1).'s',
+                'provider' => config('hack-auditor.ai.provider', 'default'),
+                'model' => config('hack-auditor.ai.model', 'default'),
+            ]);
+
+            /** @var string $outputBase */
+            $outputBase = config('hack-auditor.report.output_path', 'hack-auditor/reports');
+            $outputDir = storage_path($outputBase);
+
+            if (! is_dir($outputDir)) {
+                mkdir($outputDir, 0755, true);
+            }
+
+            $filename = 'scan-'.now()->format('Y-m-d-His').'.html';
+            $fullPath = $outputDir.DIRECTORY_SEPARATOR.$filename;
+
+            file_put_contents($fullPath, $html);
+
+            $this->components->info("HTML report saved to <fg=cyan>{$fullPath}</>");
+        } catch (\Throwable $e) {
+            $this->components->error("Failed to generate HTML report: {$e->getMessage()}");
+        }
+    }
+
+    /**
+     * Display scan comparison with previous scan if history is enabled.
+     */
+    private function displayScanComparison(VulnerabilityReport $report): void
+    {
+        if (! config('hack-auditor.history.enabled', false)) {
+            return;
+        }
+
+        try {
+            /** @var ScanResult|null $previous */
+            $previous = ScanResult::query()->latest()->first();
+
+            if ($previous === null) {
+                return;
+            }
+
+            $previousReport = new VulnerabilityReport(
+                vulnerabilities: [],
+                overallScore: $previous->score,
+                summary: '',
+                ctfIdea: '',
+            );
+
+            $delta = $report->overallScore - $previous->score;
+            $deltaSign = $delta > 0 ? '+' : '';
+            $deltaColor = $delta > 0 ? 'green' : ($delta < 0 ? 'red' : 'gray');
+
+            $this->newLine();
+            $this->line("  <fg={$deltaColor}>Score: {$report->overallScore}/100 ({$deltaSign}{$delta} since last scan)</>");
+        } catch (\Throwable) {
+            // History comparison is best-effort
+        }
+    }
+
+    /**
      * Estimate how many files would be scanned using the FileCollector.
      */
     private function estimateFileCount(): int
@@ -433,6 +666,22 @@ final class HackScanCommand extends Command
         } catch (\Throwable) {
             return 0;
         }
+    }
+
+    /**
+     * Display which paths were analyzed for scan transparency.
+     */
+    private function displayAnalyzedPaths(): void
+    {
+        /** @var array<int, string> $paths */
+        $paths = config('hack-auditor.scan.paths', []);
+
+        if ($paths === []) {
+            return;
+        }
+
+        $this->line('  <fg=gray>analyzed</>  '.implode(', ', $paths));
+        $this->newLine();
     }
 
     /**

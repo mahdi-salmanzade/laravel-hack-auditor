@@ -1,0 +1,1091 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Security Scan Report — Laravel Hack Auditor</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg: #0a0a0c;
+    --card: #111113;
+    --card-hover: #161618;
+    --border: #1e1e22;
+    --text: #e4e4e7;
+    --text-muted: #8b8b94;
+    --text-dim: #5a5a63;
+    --critical: #ef4444;
+    --high: #f97316;
+    --medium: #eab308;
+    --low: #a855f7;
+    --info: #3b82f6;
+    --green: #22c55e;
+    --radius: 10px;
+    --radius-sm: 6px;
+}
+
+body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 24px 60px;
+}
+
+/* ── Header ────────────────────────────────────────────────── */
+
+.report-header {
+    text-align: center;
+    margin-bottom: 48px;
+}
+
+.brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 24px;
+}
+
+.brand svg {
+    width: 18px;
+    height: 18px;
+    fill: currentColor;
+    opacity: 0.6;
+}
+
+.report-title {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    margin-bottom: 6px;
+}
+
+.report-subtitle {
+    font-size: 14px;
+    color: var(--text-dim);
+}
+
+/* ── Score Ring ────────────────────────────────────────────── */
+
+.score-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 40px;
+}
+
+.score-ring-wrapper {
+    position: relative;
+    width: 180px;
+    height: 180px;
+    margin-bottom: 12px;
+}
+
+.score-ring-wrapper svg {
+    transform: rotate(-90deg);
+    width: 180px;
+    height: 180px;
+}
+
+.score-ring-track {
+    fill: none;
+    stroke: var(--border);
+    stroke-width: 10;
+}
+
+.score-ring-progress {
+    fill: none;
+    stroke: {{SCORE_COLOR}};
+    stroke-width: 10;
+    stroke-linecap: round;
+    stroke-dasharray: 502.65;
+    stroke-dashoffset: 502.65;
+    animation: scoreReveal 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    filter: drop-shadow(0 0 8px {{SCORE_COLOR}}40);
+}
+
+@keyframes scoreReveal {
+    from { stroke-dashoffset: 502.65; }
+    to { stroke-dashoffset: {{STROKE_OFFSET}}; }
+}
+
+.score-value {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.score-number {
+    font-size: 48px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: {{SCORE_COLOR}};
+    line-height: 1;
+}
+
+.score-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    margin-top: 4px;
+}
+
+/* ── Severity Chips ───────────────────────────────────────── */
+
+.severity-chips {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 40px;
+}
+
+.chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    padding: 8px 18px 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    transition: border-color 0.2s;
+}
+
+.chip:hover {
+    border-color: #2a2a30;
+}
+
+.chip-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.chip-dot.critical { background: var(--critical); box-shadow: 0 0 6px var(--critical); }
+.chip-dot.high { background: var(--high); box-shadow: 0 0 6px var(--high); }
+.chip-dot.medium { background: var(--medium); box-shadow: 0 0 6px var(--medium); }
+.chip-dot.low { background: var(--low); box-shadow: 0 0 6px var(--low); }
+
+.chip-count {
+    font-variant-numeric: tabular-nums;
+}
+
+.chip-label {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+/* ── Summary ──────────────────────────────────────────────── */
+
+.summary-section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px 28px;
+    margin-bottom: 40px;
+}
+
+.section-heading {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+}
+
+.summary-text {
+    font-size: 15px;
+    color: var(--text-muted);
+    line-height: 1.75;
+}
+
+.summary-text p {
+    margin-bottom: 16px;
+}
+
+.summary-text p:last-child {
+    margin-bottom: 0;
+}
+
+.summary-collapsed {
+    max-height: 200px;
+    overflow: hidden;
+    position: relative;
+}
+
+.summary-collapsed::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    background: linear-gradient(transparent, var(--card));
+    pointer-events: none;
+}
+
+.summary-collapsed.expanded {
+    max-height: none;
+}
+
+.summary-collapsed.expanded::after {
+    display: none;
+}
+
+.summary-toggle {
+    background: transparent;
+    border: none;
+    color: var(--info);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 8px 0 0;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+.summary-toggle:hover {
+    text-decoration: underline;
+}
+
+/* ── Findings ─────────────────────────────────────────────── */
+
+.findings-section {
+    margin-bottom: 48px;
+}
+
+.findings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+}
+
+.findings-count {
+    font-size: 13px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.finding-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 10px;
+    overflow: hidden;
+    transition: border-color 0.2s, background 0.2s;
+}
+
+.finding-card:hover {
+    background: var(--card-hover);
+}
+
+.finding-card.severity-critical { border-left-color: var(--critical); }
+.finding-card.severity-high { border-left-color: var(--high); }
+.finding-card.severity-medium { border-left-color: var(--medium); }
+.finding-card.severity-low { border-left-color: var(--low); }
+
+.finding-header {
+    padding: 14px 18px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.finding-row-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.finding-row-bottom {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
+}
+
+.severity-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+
+.severity-badge.critical { background: #ef444420; color: var(--critical); }
+.severity-badge.high { background: #f9731620; color: var(--high); }
+.severity-badge.medium { background: #eab30820; color: var(--medium); }
+.severity-badge.low { background: #a855f720; color: var(--low); }
+
+.finding-type {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    flex: 1;
+}
+
+.finding-location {
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    color: var(--text-dim);
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.owasp-tag {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--info);
+    background: #3b82f615;
+    padding: 2px 7px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.toggle-icon {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-dim);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    flex-shrink: 0;
+}
+
+.finding-card[data-expanded="true"] .toggle-icon {
+    transform: rotate(90deg);
+}
+
+.finding-body {
+    display: none;
+    padding: 0 18px 18px;
+}
+
+.finding-card[data-expanded="true"] .finding-body {
+    display: block;
+    animation: fadeIn 0.25s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.finding-description {
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    margin-bottom: 16px;
+    padding-top: 14px;
+    padding-left: 16px;
+    border-top: 1px solid var(--border);
+    border-left: 2px solid var(--border);
+}
+
+.severity-critical .finding-description { border-left-color: rgba(239, 68, 68, 0.2); }
+.severity-high .finding-description { border-left-color: rgba(249, 115, 22, 0.2); }
+.severity-medium .finding-description { border-left-color: rgba(234, 179, 8, 0.2); }
+.severity-low .finding-description { border-left-color: rgba(168, 85, 247, 0.2); }
+
+.code-section {
+    margin-bottom: 14px;
+}
+
+.code-section:last-child {
+    margin-bottom: 0;
+}
+
+.code-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+}
+
+.code-block {
+    position: relative;
+    background: #08080a;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+
+.code-block pre {
+    margin: 0;
+    padding: 28px 16px 14px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    position: relative;
+}
+
+.code-block code {
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: #c4c4cc;
+    white-space: pre;
+    tab-size: 4;
+}
+
+.copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: #1e1e22;
+    color: var(--text-muted);
+    border: 1px solid #2a2a30;
+    border-radius: 5px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: system-ui, -apple-system, sans-serif;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s, background 0.15s, color 0.15s;
+    z-index: 2;
+}
+
+.code-block:hover .copy-btn {
+    opacity: 1;
+}
+
+.copy-btn:hover {
+    background: #2a2a30;
+    color: var(--text);
+}
+
+.copy-btn.copied {
+    background: #16a34a20;
+    color: var(--green);
+    border-color: #16a34a40;
+    opacity: 1;
+}
+
+/* ── Severity Dividers ────────────────────────────────────── */
+
+.severity-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 24px 0 16px;
+    font-size: 11px;
+    text-transform: uppercase;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    letter-spacing: 0.1em;
+}
+
+.severity-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: #2a2a2e;
+}
+
+.severity-divider.severity-critical span { color: #ef4444; }
+.severity-divider.severity-high span { color: #f97316; }
+.severity-divider.severity-medium span { color: #eab308; }
+.severity-divider.severity-low span { color: #a855f7; }
+
+/* ── Code Block Language Hint ────────────────────────────── */
+
+.code-block pre::before {
+    content: 'php';
+    position: absolute;
+    top: 8px;
+    left: 12px;
+    font-size: 10px;
+    color: #555;
+    text-transform: uppercase;
+}
+
+.vulnerable-label { color: #ef4444; }
+.fix-label { color: #22c55e; }
+
+.vulnerable-code { border-color: rgba(239, 68, 68, 0.15); }
+.fix-code { border-color: rgba(34, 197, 94, 0.15); }
+
+/* ── Meta / Footer ────────────────────────────────────────── */
+
+.meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 48px;
+}
+
+.meta-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+}
+
+.meta-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+}
+
+.meta-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.meta-value.mono {
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 13px;
+}
+
+.report-footer {
+    text-align: center;
+    padding: 32px 0 0;
+    border-top: 1px solid var(--border);
+}
+
+.footer-brand {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+}
+
+.footer-timestamp {
+    font-size: 12px;
+    color: var(--text-dim);
+    opacity: 0.6;
+}
+
+/* ── Expand / Collapse All ────────────────────────────────── */
+
+.expand-btn {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: system-ui, -apple-system, sans-serif;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.expand-btn:hover {
+    background: var(--card);
+    color: var(--text);
+    border-color: #2a2a30;
+}
+
+.ai-copy-btn {
+    border-color: rgba(59, 130, 246, 0.3);
+    color: #93c5fd;
+}
+
+.ai-copy-btn:hover {
+    background: rgba(59, 130, 246, 0.1);
+    border-color: rgba(59, 130, 246, 0.5);
+    color: #bfdbfe;
+}
+
+.ai-copy-btn.copied {
+    border-color: rgba(34, 197, 94, 0.4);
+    color: #86efac;
+    background: rgba(34, 197, 94, 0.08);
+}
+
+/* ── Responsive ───────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+    .container { padding: 24px 16px 40px; }
+    .report-title { font-size: 22px; }
+    .score-ring-wrapper { width: 150px; height: 150px; }
+    .score-ring-wrapper svg { width: 150px; height: 150px; }
+    .score-number { font-size: 40px; }
+    .severity-chips { gap: 8px; }
+    .chip { padding: 6px 12px 6px 10px; font-size: 12px; }
+    .finding-header { padding: 12px 14px; }
+    .finding-row-top { gap: 8px; }
+    .finding-row-bottom { gap: 8px; }
+    .finding-type { font-size: 13px; }
+    .finding-location { display: none; }
+    .finding-body { padding: 0 14px 14px; }
+    .summary-section { padding: 18px 20px; }
+    .meta-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 400px) {
+    .severity-chips { flex-direction: column; align-items: stretch; }
+    .chip { justify-content: center; }
+    .meta-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Print ────────────────────────────────────────────────── */
+
+@media print {
+    *, *::before, *::after {
+        color-adjust: exact;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    body {
+        background: #fff;
+        color: #111;
+    }
+
+    .container {
+        max-width: 100%;
+        padding: 0;
+    }
+
+    .score-ring-progress {
+        animation: none;
+        stroke-dashoffset: {{STROKE_OFFSET}};
+    }
+
+    .finding-card {
+        background: #f9f9f9;
+        border: 1px solid #ddd;
+        break-inside: avoid;
+    }
+
+    .finding-card .finding-body {
+        display: block !important;
+    }
+
+    .finding-card .toggle-icon {
+        display: none;
+    }
+
+    .finding-header {
+        cursor: default;
+    }
+
+    .code-block pre::before {
+        color: #999;
+    }
+
+    .vulnerable-label { color: #dc2626; }
+    .fix-label { color: #16a34a; }
+
+    .vulnerable-code { border-color: rgba(220, 38, 38, 0.15); }
+    .fix-code { border-color: rgba(22, 163, 74, 0.15); }
+
+    .copy-btn {
+        display: none !important;
+    }
+
+    .expand-btn, .ai-copy-btn {
+        display: none;
+    }
+
+    .summary-toggle {
+        display: none;
+    }
+
+    .summary-collapsed {
+        max-height: none;
+        overflow: visible;
+    }
+
+    .summary-collapsed::after {
+        display: none;
+    }
+
+    .severity-divider::after {
+        background: #ddd;
+    }
+
+    .severity-divider.severity-critical span { color: #dc2626; }
+    .severity-divider.severity-high span { color: #ea580c; }
+    .severity-divider.severity-medium span { color: #ca8a04; }
+    .severity-divider.severity-low span { color: #9333ea; }
+
+    .summary-section {
+        background: #f9f9f9;
+        border-color: #ddd;
+    }
+
+    .summary-text {
+        color: #333;
+    }
+
+    .meta-card {
+        background: #f9f9f9;
+        border-color: #ddd;
+    }
+
+    .meta-label {
+        color: #666;
+    }
+
+    .meta-value {
+        color: #111;
+    }
+
+    .report-footer {
+        border-color: #ddd;
+    }
+
+    .code-block {
+        background: #f4f4f5;
+        border-color: #ddd;
+    }
+
+    .code-block code {
+        color: #1a1a1a;
+    }
+
+    .finding-description {
+        color: #333;
+        border-color: #ddd;
+    }
+
+    .section-heading {
+        color: #666;
+    }
+
+    .severity-badge.critical { background: #fef2f2; color: #dc2626; }
+    .severity-badge.high { background: #fff7ed; color: #ea580c; }
+    .severity-badge.medium { background: #fefce8; color: #ca8a04; }
+    .severity-badge.low { background: #faf5ff; color: #9333ea; }
+
+    .chip {
+        background: #f4f4f5;
+        border-color: #ddd;
+        color: #111;
+    }
+
+    .chip-label { color: #666; }
+
+    .owasp-tag {
+        background: #eff6ff;
+        color: #2563eb;
+    }
+
+    .report-title { color: #111; }
+    .report-subtitle { color: #666; }
+    .brand { color: #666; }
+    .footer-brand, .footer-timestamp { color: #666; }
+    .score-number { filter: none; }
+
+    .finding-card.severity-critical { border-left-color: #dc2626; }
+    .finding-card.severity-high { border-left-color: #ea580c; }
+    .finding-card.severity-medium { border-left-color: #ca8a04; }
+    .finding-card.severity-low { border-left-color: #9333ea; }
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+    <!-- Header -->
+    <header class="report-header">
+        <div class="brand">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 2.18l7 3.12v4.7c0 4.83-3.23 9.36-7 10.58-3.77-1.22-7-5.75-7-10.58V6.3l7-3.12zm-1 5.82v2h2v-2h-2zm0 4v6h2v-6h-2z"/></svg>
+            Laravel Hack Auditor
+        </div>
+        <h1 class="report-title">Security Scan Report</h1>
+        <p class="report-subtitle">Automated AI-assisted vulnerability analysis</p>
+    </header>
+
+    <!-- Score Ring -->
+    <section class="score-section">
+        <div class="score-ring-wrapper">
+            <svg viewBox="0 0 180 180">
+                <circle class="score-ring-track" cx="90" cy="90" r="80" />
+                <circle class="score-ring-progress" cx="90" cy="90" r="80" />
+            </svg>
+            <div class="score-value">
+                <span class="score-number">{{SCORE}}</span>
+                <span class="score-label">Score</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- Severity Chips -->
+    <div class="severity-chips">
+        <div class="chip">
+            <span class="chip-dot critical"></span>
+            <span class="chip-count">{{CRITICAL_COUNT}}</span>
+            <span class="chip-label">Critical</span>
+        </div>
+        <div class="chip">
+            <span class="chip-dot high"></span>
+            <span class="chip-count">{{HIGH_COUNT}}</span>
+            <span class="chip-label">High</span>
+        </div>
+        <div class="chip">
+            <span class="chip-dot medium"></span>
+            <span class="chip-count">{{MEDIUM_COUNT}}</span>
+            <span class="chip-label">Medium</span>
+        </div>
+        <div class="chip">
+            <span class="chip-dot low"></span>
+            <span class="chip-count">{{LOW_COUNT}}</span>
+            <span class="chip-label">Low</span>
+        </div>
+    </div>
+
+    <!-- Scan Metadata -->
+    <div class="meta-grid">
+        <div class="meta-card">
+            <div class="meta-label">Scanned At</div>
+            <div class="meta-value">{{SCANNED_AT}}</div>
+        </div>
+        <div class="meta-card">
+            <div class="meta-label">Duration</div>
+            <div class="meta-value mono">{{DURATION}}</div>
+        </div>
+        <div class="meta-card">
+            <div class="meta-label">Files Analyzed</div>
+            <div class="meta-value">{{TOTAL_FILES}}</div>
+        </div>
+        <div class="meta-card">
+            <div class="meta-label">AI Provider</div>
+            <div class="meta-value mono">{{PROVIDER}}</div>
+        </div>
+    </div>
+
+    <!-- Summary -->
+    <section class="summary-section">
+        <div class="section-heading">Executive Summary</div>
+        <div class="summary-text">{{SUMMARY}}</div>
+    </section>
+
+    <!-- Findings -->
+    <section class="findings-section">
+        <div class="findings-header">
+            <div class="section-heading" style="margin-bottom:0">Findings</div>
+            <div style="display:flex;align-items:center;gap:12px">
+                <span class="findings-count">{{TOTAL_COUNT}} issues</span>
+                <button class="expand-btn ai-copy-btn" onclick="copyForAI()" id="aiCopyBtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>Copy for AI</button>
+                <button class="expand-btn" onclick="toggleAll()" id="toggleAllBtn">Expand All</button>
+            </div>
+        </div>
+
+        {{FINDINGS}}
+
+    </section>
+
+    <!-- Footer -->
+    <footer class="report-footer">
+        <div class="footer-brand">Generated by Laravel Hack Auditor</div>
+        <div class="footer-timestamp">{{SCANNED_AT}}</div>
+    </footer>
+
+</div>
+
+<script>
+function toggleSummary() {
+    var el = document.getElementById('summaryContent');
+    var btn = el ? el.nextElementSibling : null;
+    if (!el || !btn) return;
+    var isExpanded = el.classList.contains('expanded');
+    el.classList.toggle('expanded');
+    btn.textContent = isExpanded ? 'Read full summary' : 'Collapse summary';
+}
+
+function toggleCard(header) {
+    var card = header.closest('.finding-card');
+    var expanded = card.getAttribute('data-expanded') === 'true';
+    card.setAttribute('data-expanded', expanded ? 'false' : 'true');
+    updateToggleAllLabel();
+}
+
+function toggleAll() {
+    var cards = document.querySelectorAll('.finding-card');
+    var allExpanded = true;
+    for (var i = 0; i < cards.length; i++) {
+        if (cards[i].getAttribute('data-expanded') !== 'true') {
+            allExpanded = false;
+            break;
+        }
+    }
+    var newState = allExpanded ? 'false' : 'true';
+    for (var i = 0; i < cards.length; i++) {
+        cards[i].setAttribute('data-expanded', newState);
+    }
+    updateToggleAllLabel();
+}
+
+function updateToggleAllLabel() {
+    var cards = document.querySelectorAll('.finding-card');
+    var allExpanded = true;
+    for (var i = 0; i < cards.length; i++) {
+        if (cards[i].getAttribute('data-expanded') !== 'true') {
+            allExpanded = false;
+            break;
+        }
+    }
+    var btn = document.getElementById('toggleAllBtn');
+    if (btn) {
+        btn.textContent = allExpanded ? 'Collapse All' : 'Expand All';
+    }
+}
+
+function copyCode(btn) {
+    var codeEl = btn.parentElement.querySelector('code');
+    if (!codeEl) return;
+    var text = codeEl.textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+            showCopied(btn);
+        }).catch(function() {
+            fallbackCopy(text, btn);
+        });
+    } else {
+        fallbackCopy(text, btn);
+    }
+}
+
+function fallbackCopy(text, btn) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); showCopied(btn); } catch (e) { /* noop */ }
+    document.body.removeChild(ta);
+}
+
+function showCopied(btn) {
+    var original = btn.textContent;
+    btn.textContent = 'Copied';
+    btn.classList.add('copied');
+    setTimeout(function() {
+        btn.textContent = original;
+        btn.classList.remove('copied');
+    }, 1500);
+}
+
+function copyForAI() {
+    var findings = document.querySelectorAll('.finding-card');
+    var lines = [];
+
+    var score = document.querySelector('.score-number').textContent.trim();
+    var chips = document.querySelectorAll('.chip');
+    var severityCounts = [];
+    chips.forEach(function(chip) {
+        var count = chip.querySelector('.chip-count').textContent.trim();
+        var label = chip.querySelector('.chip-label').textContent.trim();
+        if (parseInt(count) > 0) severityCounts.push(count + ' ' + label);
+    });
+
+    lines.push('# Security Audit Findings');
+    lines.push('');
+    lines.push('The following vulnerabilities were found by Laravel Hack Auditor (AI-powered security scanner).');
+    lines.push('Score: ' + score + '/100 — ' + findings.length + ' issues found (' + severityCounts.join(', ') + ').');
+    lines.push('');
+    lines.push('Please analyze each vulnerability below and provide the fix. For each one:');
+    lines.push('1. Confirm if the vulnerability is valid in the context of a Laravel application');
+    lines.push('2. Provide the corrected code that I can copy-paste to replace the vulnerable code');
+    lines.push('3. If additional changes are needed elsewhere (routes, middleware, config), specify exactly what and where');
+    lines.push('4. If a finding is a false positive, explain why');
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+
+    findings.forEach(function(card, index) {
+        var severity = card.querySelector('.severity-badge').textContent.trim();
+        var type = card.querySelector('.finding-type').textContent.trim();
+        var location = card.querySelector('.finding-location').textContent.trim();
+        var owasp = card.querySelector('.owasp-tag');
+        var owaspText = owasp ? (owasp.getAttribute('title') || owasp.textContent.trim()) : '';
+        var description = card.querySelector('.finding-description');
+        var descText = description ? description.textContent.trim() : '';
+
+        lines.push('## ' + (index + 1) + '. [' + severity + '] ' + type);
+        lines.push('**File:** `' + location + '`');
+        if (owaspText) lines.push('**OWASP:** ' + owaspText);
+        lines.push('');
+        lines.push(descText);
+        lines.push('');
+
+        var codeSections = card.querySelectorAll('.code-section');
+        codeSections.forEach(function(section) {
+            var label = section.querySelector('.code-label');
+            var code = section.querySelector('code');
+            if (label && code) {
+                lines.push('**' + label.textContent.trim() + ':**');
+                lines.push('```php');
+                lines.push(code.textContent.trim());
+                lines.push('```');
+                lines.push('');
+            }
+        });
+
+        lines.push('---');
+        lines.push('');
+    });
+
+    var text = lines.join('\n');
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+            showAICopied();
+        }).catch(function() {
+            fallbackCopy(text, document.getElementById('aiCopyBtn'));
+            showAICopied();
+        });
+    } else {
+        fallbackCopy(text, document.getElementById('aiCopyBtn'));
+        showAICopied();
+    }
+}
+
+function showAICopied() {
+    var btn = document.getElementById('aiCopyBtn');
+    if (!btn) return;
+    var originalHTML = btn.innerHTML;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><path d="M20 6L9 17l-5-5"/></svg>Copied! Paste into AI';
+    btn.classList.add('copied');
+    setTimeout(function() {
+        btn.innerHTML = originalHTML;
+        btn.classList.remove('copied');
+    }, 2500);
+}
+</script>
+
+</body>
+</html>

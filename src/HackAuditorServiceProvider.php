@@ -10,13 +10,18 @@ use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Console\HackCTFCommand;
 use Mahdi\HackAuditor\Console\HackDemoCommand;
+use Mahdi\HackAuditor\Console\HackReportCommand;
 use Mahdi\HackAuditor\Console\HackScanCommand;
 use Mahdi\HackAuditor\Contracts\CTFGeneratorInterface;
 use Mahdi\HackAuditor\Contracts\ScannerInterface;
 use Mahdi\HackAuditor\CTF\CTFGenerator;
+use Mahdi\HackAuditor\Report\HtmlReportGenerator;
+use Mahdi\HackAuditor\Scanner\Baseline;
 use Mahdi\HackAuditor\Scanner\CodeExtractor;
 use Mahdi\HackAuditor\Scanner\FileCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
+use Mahdi\HackAuditor\Scanner\RouteAnalyzer;
+use Mahdi\HackAuditor\Scanner\RuntimeIntrospector;
 
 final class HackAuditorServiceProvider extends ServiceProvider
 {
@@ -32,6 +37,10 @@ final class HackAuditorServiceProvider extends ServiceProvider
 
         $this->app->singleton(FileCollector::class);
         $this->app->singleton(CodeExtractor::class);
+        $this->app->singleton(RouteAnalyzer::class);
+        $this->app->singleton(RuntimeIntrospector::class);
+        $this->app->singleton(Baseline::class);
+        $this->app->singleton(HtmlReportGenerator::class);
         $this->app->singleton(PromptBuilder::class);
         $this->app->singleton(ResponseParser::class);
         $this->app->singleton(AIAdapter::class);
@@ -43,6 +52,8 @@ final class HackAuditorServiceProvider extends ServiceProvider
                 promptBuilder: $app->make(PromptBuilder::class),
                 responseParser: $app->make(ResponseParser::class),
                 aiAdapter: $app->make(AIAdapter::class),
+                routeAnalyzer: $app->make(RouteAnalyzer::class),
+                runtimeIntrospector: $app->make(RuntimeIntrospector::class),
             );
         });
 
@@ -75,6 +86,7 @@ final class HackAuditorServiceProvider extends ServiceProvider
                 HackScanCommand::class,
                 HackDemoCommand::class,
                 HackCTFCommand::class,
+                HackReportCommand::class,
             ]);
 
             $this->publishes([

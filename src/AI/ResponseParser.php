@@ -28,6 +28,7 @@ final class ResponseParser
         $this->validateRequiredFields($data);
 
         $vulnerabilities = $this->parseVulnerabilities($data['vulnerabilities']);
+        $vulnerabilities = $this->filterSelfContradictions($vulnerabilities);
         $overallScore = $this->parseOverallScore($data['overall_score']);
         $summary = $this->parseStringField($data, 'summary');
         $ctfIdea = $this->parseOptionalStringField($data, 'ctf_idea');
@@ -305,5 +306,67 @@ final class ResponseParser
         }
 
         return $data[$field];
+    }
+
+    /**
+     * Filter out findings where the description contradicts its own conclusion.
+     *
+     * Catches cases where the AI analysis concludes a finding is safe but still
+     * emits it as a vulnerability (e.g., "this is not actually a vulnerability").
+     *
+     * @param  array<int, Vulnerability>  $vulnerabilities
+     * @return array<int, Vulnerability>
+     */
+    private function filterSelfContradictions(array $vulnerabilities): array
+    {
+        return array_values(array_filter(
+            $vulnerabilities,
+            fn (Vulnerability $v): bool => ! $this->isSelfContradicting($v->description),
+        ));
+    }
+
+    /**
+     * Check if a vulnerability description contradicts its own finding.
+     */
+    private function isSelfContradicting(string $description): bool
+    {
+        $dismissalPatterns = [
+            'this is not a vulnerability',
+            'this is not actually a vulnerability',
+            'not actually vulnerable',
+            'not a real vulnerability',
+            'not a real issue',
+            'not a security issue',
+            'not a security vulnerability',
+            'not exploitable',
+            'not a concern',
+            'already mitigated',
+            'already handled',
+            'already protected',
+        ];
+
+        $lower = strtolower($description);
+
+        foreach ($dismissalPatterns as $pattern) {
+            if (str_contains($lower, $pattern)) {
+                return true;
+            }
+        }
+
+        // Regex patterns for more complex contradictions
+        $regexPatterns = [
+            '/this is not (?:a |an )?[\w\s]{0,30}(?:issue|vulnerability)/i',
+            '/on closer inspection[\s\S]{0,80}(?:not|safe|properly|handled)/i',
+            '/fields are explicitly (?:specified|listed|enumerated)/i',
+            '/properly (?:controlled|protected|validated|handled)/i',
+        ];
+
+        foreach ($regexPatterns as $regex) {
+            if (preg_match($regex, $description)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

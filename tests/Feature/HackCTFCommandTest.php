@@ -51,7 +51,7 @@ it('command with specific vulnerability argument runs successfully', function ()
 
 it('command output contains the banner', function (): void {
     $this->artisan('hack:ctf', ['vulnerability' => 'sql_injection'])
-        ->expectsOutputToContain('HACK AUDITOR — CTF Generator');
+        ->expectsOutputToContain('CTF Generator');
 });
 
 it('command output contains challenge generated confirmation', function (): void {

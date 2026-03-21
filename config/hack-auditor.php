@@ -103,6 +103,32 @@ return [
             '*.pem',
             'storage/logs/*',
         ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Git Diff Base Branch
+        |----------------------------------------------------------------------
+        |
+        | The base branch used when scanning with --diff. When null, the
+        | package auto-detects main or master. Set this if your default
+        | branch has a different name.
+        |
+        */
+
+        'diff_base_branch' => null,
+
+        /*
+        |----------------------------------------------------------------------
+        | Baseline File Path
+        |----------------------------------------------------------------------
+        |
+        | Path to the baseline JSON file for suppressing known findings.
+        | Use --update-baseline to save current findings, --no-baseline
+        | to ignore the baseline file during scans.
+        |
+        */
+
+        'baseline_path' => base_path('hack-auditor-baseline.json'),
     ],
 
     /*
@@ -131,7 +157,21 @@ return [
     */
 
     'ctf' => [
-        'output_path' => 'storage/hack-auditor/ctf',
+        'output_path' => 'hack-auditor/ctf',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Report Settings
+    |--------------------------------------------------------------------------
+    |
+    | Configure the output path for generated HTML security reports.
+    | Reports are self-contained single-file HTML documents.
+    |
+    */
+
+    'report' => [
+        'output_path' => 'hack-auditor/reports',
     ],
 
     /*
@@ -164,6 +204,7 @@ return [
             '#HackAuditor',
             '#CTF',
         ],
+        'ai_tweets' => true,
     ],
 
 ];
