@@ -38,7 +38,7 @@ it('system prompt contains key vulnerability categories', function (): void {
 it('system prompt instructs to return valid JSON', function (): void {
     $prompt = $this->builder->systemPrompt();
 
-    expect($prompt)->toContain('valid JSON')
+    expect($prompt)->toContain('JSON')
         ->and($prompt)->toContain('"vulnerabilities"')
         ->and($prompt)->toContain('"overall_score"')
         ->and($prompt)->toContain('"summary"');

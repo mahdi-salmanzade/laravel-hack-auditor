@@ -373,3 +373,135 @@ it('handles whitespace around JSON response', function (): void {
     expect($report)->toBeInstanceOf(VulnerabilityReport::class)
         ->and($report->overallScore)->toBe(25);
 });
+
+it('extracts JSON when prose appears before the JSON block', function (): void {
+    $json = validJsonResponse();
+    $response = "Looking at this controller, I found the following issues:\n\n{$json}";
+
+    $report = $this->parser->parse($response);
+
+    expect($report)->toBeInstanceOf(VulnerabilityReport::class)
+        ->and($report->overallScore)->toBe(25)
+        ->and($report->vulnerabilities)->toHaveCount(1);
+});
+
+it('extracts JSON when prose appears before and after the JSON block', function (): void {
+    $json = validJsonResponse();
+    $response = "Here's my analysis of the code:\n\n{$json}\n\nLet me know if you need more details about any of these findings.";
+
+    $report = $this->parser->parse($response);
+
+    expect($report)->toBeInstanceOf(VulnerabilityReport::class)
+        ->and($report->overallScore)->toBe(25)
+        ->and($report->vulnerabilities)->toHaveCount(1)
+        ->and($report->summary)->toBe('Critical vulnerability found.');
+});
+
+it('handles JSON with unbalanced braces inside string values', function (): void {
+    $json = json_encode([
+        'vulnerabilities' => [
+            [
+                'type' => 'sql_injection',
+                'location' => 'app/Http/Controllers/UserController.php',
+                'line' => 42,
+                'severity' => 'critical',
+                'description' => 'Raw SQL injection via user input.',
+                'proof' => 'if ($x) {',
+                'fix' => 'Use parameterized queries: DB::select("SELECT * FROM users WHERE id = ?", [$id])',
+            ],
+        ],
+        'overall_score' => 25,
+        'summary' => 'Critical vulnerability found.',
+        'ctf_idea' => 'SQL Injection challenge',
+    ], JSON_THROW_ON_ERROR);
+
+    $response = "Analysis results:\n\n{$json}";
+
+    $report = $this->parser->parse($response);
+
+    expect($report)->toBeInstanceOf(VulnerabilityReport::class)
+        ->and($report->overallScore)->toBe(25)
+        ->and($report->vulnerabilities)->toHaveCount(1)
+        ->and($report->vulnerabilities[0]->proof)->toBe('if ($x) {');
+});
+
+it('handles JSON with balanced braces inside string values like PHP code', function (): void {
+    $json = json_encode([
+        'vulnerabilities' => [
+            [
+                'type' => 'sql_injection',
+                'location' => 'app/Http/Controllers/UserController.php',
+                'line' => 42,
+                'severity' => 'critical',
+                'description' => 'Concatenated input in query.',
+                'proof' => 'if ($x) { return DB::select("SELECT * FROM users WHERE id = " . $id); }',
+                'fix' => 'if ($x) { return DB::select("SELECT * FROM users WHERE id = ?", [$id]); }',
+            ],
+        ],
+        'overall_score' => 25,
+        'summary' => 'Critical vulnerability found.',
+    ], JSON_THROW_ON_ERROR);
+
+    $response = "Here is the security report:\n\n{$json}\n\nEnd of report.";
+
+    $report = $this->parser->parse($response);
+
+    expect($report)->toBeInstanceOf(VulnerabilityReport::class)
+        ->and($report->overallScore)->toBe(25)
+        ->and($report->vulnerabilities)->toHaveCount(1);
+});
+
+it('skips non-target JSON objects and finds the one with vulnerabilities key', function (): void {
+    $smallJson = json_encode(['note' => 'preliminary analysis']);
+    $realJson = json_encode([
+        'vulnerabilities' => [
+            [
+                'type' => 'xss',
+                'location' => 'resources/views/profile.blade.php',
+                'line' => 15,
+                'severity' => 'high',
+                'description' => 'Unescaped output.',
+                'proof' => '{!! $user->bio !!}',
+                'fix' => '{{ $user->bio }}',
+            ],
+        ],
+        'overall_score' => 60,
+        'summary' => 'XSS found.',
+    ], JSON_THROW_ON_ERROR);
+
+    $response = "Let me first note: {$smallJson}\n\nNow for the full analysis:\n\n{$realJson}";
+
+    $report = $this->parser->parse($response);
+
+    expect($report)->toBeInstanceOf(VulnerabilityReport::class)
+        ->and($report->overallScore)->toBe(60)
+        ->and($report->vulnerabilities)->toHaveCount(1)
+        ->and($report->vulnerabilities[0]->type)->toBe(VulnerabilityType::Xss);
+});
+
+it('handles JSON with newlines in string values', function (): void {
+    $json = json_encode([
+        'vulnerabilities' => [
+            [
+                'type' => 'sql_injection',
+                'location' => 'app/Http/Controllers/UserController.php',
+                'line' => 42,
+                'severity' => 'critical',
+                'description' => "Raw SQL injection.\nUser input is concatenated directly.\nThis allows arbitrary queries.",
+                'proof' => "Line 42: \$query = \"SELECT * FROM users WHERE id = \" . \$id;\nLine 43: DB::select(\$query);",
+                'fix' => "Use parameterized queries:\nDB::select(\"SELECT * FROM users WHERE id = ?\", [\$id]);",
+            ],
+        ],
+        'overall_score' => 25,
+        'summary' => "Multiple issues detected.\nSee details above.",
+    ], JSON_THROW_ON_ERROR);
+
+    $response = "Security analysis complete:\n\n{$json}";
+
+    $report = $this->parser->parse($response);
+
+    expect($report)->toBeInstanceOf(VulnerabilityReport::class)
+        ->and($report->overallScore)->toBe(25)
+        ->and($report->vulnerabilities)->toHaveCount(1)
+        ->and($report->vulnerabilities[0]->description)->toContain("\n");
+});

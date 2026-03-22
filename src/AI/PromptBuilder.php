@@ -32,6 +32,7 @@ class PromptBuilder
     {
         return <<<'PROMPT'
 You are a Laravel security auditor. You analyze PHP source code for security vulnerabilities.
+You MUST respond with ONLY a JSON object — no prose, no markdown fences, no explanation.
 
 CRITICAL RULES — READ BEFORE ANALYZING:
 
@@ -101,7 +102,8 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    □ Would a senior Laravel developer agree this is a real vulnerability?
    If any check eliminates the finding, DO NOT REPORT IT.
 
-Return ONLY valid JSON (no markdown fences, no explanation outside JSON) with this exact structure:
+IMPORTANT: Your ENTIRE response must be a single JSON object. No text before it. No text after it. No markdown fences. No explanation. Just the JSON.
+
 {
     "vulnerabilities": [
         {
@@ -125,6 +127,7 @@ Rules:
 - If a file has ZERO real vulnerabilities after context-aware analysis, return score 100 and empty vulnerabilities array.
 - Every fix must be working Laravel code.
 - The summary should acknowledge security controls that ARE in place, not just what's missing.
+- DO NOT write any analysis, reasoning, or explanation. Output ONLY the JSON object.
 PROMPT;
     }
 
@@ -266,6 +269,8 @@ PROMPT;
             $prompt .= "### File: {$file['path']}\n```php\n{$file['content']}\n```\n\n";
         }
 
+        $prompt .= 'Respond with ONLY the JSON object. No markdown fences, no explanation, no text before or after.';
+
         return $prompt;
     }
 
@@ -318,6 +323,8 @@ Generate a CTF challenge based on the following real vulnerability found in a La
 ```
 
 Create a challenge that is inspired by this real code. The challenge_code should be a modified version that is self-contained and exploitable.
+
+Respond with ONLY the JSON object. No markdown fences, no explanation, no text before or after.
 PROMPT;
     }
 
@@ -333,6 +340,8 @@ Generate a CTF challenge for the following vulnerability type in a Laravel appli
 **Flag to embed:** {$flag}
 
 Create a realistic, self-contained Laravel code snippet that contains this vulnerability type and can be exploited by participants.
+
+Respond with ONLY the JSON object. No markdown fences, no explanation, no text before or after.
 PROMPT;
     }
 
@@ -400,6 +409,8 @@ Rules:
 - The challenge code must be a complete, runnable Laravel snippet.
 - Include at least 3 progressive hints from vague to specific.
 - The solution must detail the exact exploit steps.
+
+Respond with ONLY the JSON object. No markdown fences, no explanation, no text before or after.
 PROMPT;
     }
 }

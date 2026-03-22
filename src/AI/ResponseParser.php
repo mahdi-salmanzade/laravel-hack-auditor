@@ -68,6 +68,17 @@ final class ResponseParser
             }
         }
 
+        // Last resort: find the first { ... } block that looks like valid JSON
+        $extracted = $this->extractJsonFromMixedText($trimmed);
+
+        if ($extracted !== null) {
+            $decoded = json_decode($extracted, true);
+
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+
         throw InvalidAIResponseException::malformed(
             'Response is not valid JSON and no JSON block could be extracted.',
             $trimmed,
@@ -81,6 +92,96 @@ final class ResponseParser
     {
         if (preg_match('/```(?:json)?\s*\n?(.*?)\n?\s*```/s', $response, $matches)) {
             return trim($matches[1]);
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract JSON from mixed prose + JSON text.
+     *
+     * Some models return analysis text before/after the JSON object.
+     * Uses string-aware brace counting so that braces inside JSON string
+     * values (e.g. PHP code snippets) do not confuse the depth tracker.
+     * When the first candidate block does not contain the required keys,
+     * subsequent { ... } blocks are tried.
+     */
+    private function extractJsonFromMixedText(string $response): ?string
+    {
+        $offset = 0;
+        $length = strlen($response);
+
+        while ($offset < $length) {
+            $start = strpos($response, '{', $offset);
+
+            if ($start === false) {
+                return null;
+            }
+
+            $candidate = $this->extractBalancedBlock($response, $start, $length);
+
+            if ($candidate === null) {
+                return null;
+            }
+
+            $decoded = json_decode($candidate, true);
+
+            if (is_array($decoded) && isset($decoded['vulnerabilities'])) {
+                return $candidate;
+            }
+
+            // This block was valid JSON but not our target, or invalid JSON -- skip past it
+            $offset = $start + strlen($candidate);
+
+            // If it wasn't valid JSON, just skip one character to avoid infinite loop
+            if ($decoded === null) {
+                $offset = $start + 1;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract a balanced { ... } block starting at the given position.
+     *
+     * Tracks whether the scanner is inside a JSON string literal so that
+     * braces within strings (e.g. PHP code in proof/fix fields) do not
+     * affect the depth counter. Handles escaped characters within strings.
+     */
+    private function extractBalancedBlock(string $response, int $start, int $length): ?string
+    {
+        $depth = 0;
+        $inString = false;
+
+        for ($i = $start; $i < $length; $i++) {
+            $char = $response[$i];
+
+            if ($inString) {
+                if ($char === '\\') {
+                    $i++; // skip the escaped character
+
+                    continue;
+                }
+
+                if ($char === '"') {
+                    $inString = false;
+                }
+
+                continue;
+            }
+
+            if ($char === '"') {
+                $inString = true;
+            } elseif ($char === '{') {
+                $depth++;
+            } elseif ($char === '}') {
+                $depth--;
+
+                if ($depth === 0) {
+                    return substr($response, $start, $i - $start + 1);
+                }
+            }
         }
 
         return null;

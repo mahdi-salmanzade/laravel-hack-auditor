@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\Scanner;
 
+use Illuminate\Support\Facades\Log;
 use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Contracts\ScannerInterface;
+use Mahdi\HackAuditor\Exceptions\InvalidAIResponseException;
 use Mahdi\HackAuditor\Support\UsageTracker;
 use SplFileInfo;
 
@@ -33,6 +35,8 @@ final class HackScanner implements ScannerInterface
 
     private int $filesSkipped = 0;
 
+    private int $chunksFailedParse = 0;
+
     /**
      * Set the usage tracker for token consumption monitoring.
      */
@@ -40,6 +44,15 @@ final class HackScanner implements ScannerInterface
     {
         $this->usageTracker = $tracker;
         $this->filesSkipped = 0;
+        $this->chunksFailedParse = 0;
+    }
+
+    /**
+     * Get the number of chunks that failed to parse during the last scan.
+     */
+    public function getChunksFailedParse(): int
+    {
+        return $this->chunksFailedParse;
     }
 
     /**
@@ -96,7 +109,21 @@ final class HackScanner implements ScannerInterface
             $this->appContext = $this->contextCollector->collect([$extracted]);
         }
 
-        $report = $this->analyzeFiles([$extracted]);
+        try {
+            $report = $this->analyzeFiles([$extracted]);
+        } catch (InvalidAIResponseException $e) {
+            Log::warning('[HackAuditor] Failed to parse AI response for file scan', [
+                'path' => $path,
+                'error' => $e->getMessage(),
+            ]);
+
+            $report = new VulnerabilityReport(
+                vulnerabilities: [],
+                overallScore: 0,
+                summary: "AI response could not be parsed for {$path}. Re-run the scan to retry.",
+                ctfIdea: '',
+            );
+        }
 
         if ($this->usageTracker !== null) {
             $report->setUsageTracker($this->usageTracker);
@@ -116,7 +143,20 @@ final class HackScanner implements ScannerInterface
             'type' => 'other',
         ];
 
-        $report = $this->analyzeFiles([$fileData]);
+        try {
+            $report = $this->analyzeFiles([$fileData]);
+        } catch (InvalidAIResponseException $e) {
+            Log::warning('[HackAuditor] Failed to parse AI response for inline code scan', [
+                'error' => $e->getMessage(),
+            ]);
+
+            $report = new VulnerabilityReport(
+                vulnerabilities: [],
+                overallScore: 0,
+                summary: 'AI response could not be parsed. Re-run the scan to retry.',
+                ctfIdea: '',
+            );
+        }
 
         if ($this->usageTracker !== null) {
             $report->setUsageTracker($this->usageTracker);
@@ -146,7 +186,16 @@ final class HackScanner implements ScannerInterface
                 }
             }
 
-            $reports[] = $this->analyzeFiles($chunk);
+            try {
+                $reports[] = $this->analyzeFiles($chunk);
+            } catch (InvalidAIResponseException $e) {
+                $this->chunksFailedParse++;
+
+                Log::warning('[HackAuditor] Skipping chunk due to unparseable AI response', [
+                    'files' => array_map(fn (array $f): string => $f['path'], $chunk),
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         $report = $this->mergeReports($reports);

@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Log;
 
 use function Laravel\Prompts\spin;
 
 use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
+use Mahdi\HackAuditor\Exceptions\InvalidAIResponseException;
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
 use Mahdi\HackAuditor\Scanner\Baseline;
 use Mahdi\HackAuditor\Scanner\CodeExtractor;
@@ -211,6 +213,14 @@ final class HackScanCommand extends Command
             $this->components->warn(
                 "Token limit reached — {$report->getFilesSkipped()} file(s) skipped. "
                 .'Increase with --limit or remove the flag for unlimited.'
+            );
+        }
+
+        $chunksFailedParse = $scanner->getChunksFailedParse();
+        if ($chunksFailedParse > 0) {
+            $this->components->warn(
+                "{$chunksFailedParse} chunk(s) returned unparseable AI responses and were skipped. "
+                .'Re-run the scan to retry those files.'
             );
         }
 
@@ -535,10 +545,17 @@ final class HackScanCommand extends Command
         $reports = [];
 
         foreach ($chunks as $chunk) {
-            $systemPrompt = app(PromptBuilder::class)->systemPrompt();
-            $userPrompt = app(PromptBuilder::class)->userPrompt($chunk);
-            $response = app(AIAdapter::class)->send($systemPrompt, $userPrompt);
-            $reports[] = app(ResponseParser::class)->parse($response);
+            try {
+                $systemPrompt = app(PromptBuilder::class)->systemPrompt();
+                $userPrompt = app(PromptBuilder::class)->userPrompt($chunk);
+                $response = app(AIAdapter::class)->send($systemPrompt, $userPrompt);
+                $reports[] = app(ResponseParser::class)->parse($response);
+            } catch (InvalidAIResponseException $e) {
+                Log::warning('[HackAuditor] Skipping diff chunk due to unparseable AI response', [
+                    'files' => array_map(fn (array $f): string => $f['path'], $chunk),
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         if (count($reports) === 0) {
