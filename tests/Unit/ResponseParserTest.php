@@ -10,7 +10,7 @@ use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
 
 beforeEach(function (): void {
-    $this->parser = new ResponseParser();
+    $this->parser = new ResponseParser;
 });
 
 function validJsonResponse(array $overrides = []): string

@@ -42,7 +42,7 @@ function buildTestReport(int $score = 45, array $severities = []): Vulnerability
 }
 
 beforeEach(function (): void {
-    $this->helper = new ShareHelper();
+    $this->helper = new ShareHelper;
 });
 
 // Twitter URL tests

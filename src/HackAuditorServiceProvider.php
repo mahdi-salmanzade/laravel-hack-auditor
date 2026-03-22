@@ -10,14 +10,17 @@ use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Console\HackCTFCommand;
 use Mahdi\HackAuditor\Console\HackDemoCommand;
+use Mahdi\HackAuditor\Console\HackHelpCommand;
 use Mahdi\HackAuditor\Console\HackReportCommand;
 use Mahdi\HackAuditor\Console\HackScanCommand;
+use Mahdi\HackAuditor\Console\HackUsageCommand;
 use Mahdi\HackAuditor\Contracts\CTFGeneratorInterface;
 use Mahdi\HackAuditor\Contracts\ScannerInterface;
 use Mahdi\HackAuditor\CTF\CTFGenerator;
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
 use Mahdi\HackAuditor\Scanner\Baseline;
 use Mahdi\HackAuditor\Scanner\CodeExtractor;
+use Mahdi\HackAuditor\Scanner\ContextCollector;
 use Mahdi\HackAuditor\Scanner\FileCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
 use Mahdi\HackAuditor\Scanner\RouteAnalyzer;
@@ -40,6 +43,7 @@ final class HackAuditorServiceProvider extends ServiceProvider
         $this->app->singleton(RouteAnalyzer::class);
         $this->app->singleton(RuntimeIntrospector::class);
         $this->app->singleton(Baseline::class);
+        $this->app->singleton(ContextCollector::class);
         $this->app->singleton(HtmlReportGenerator::class);
         $this->app->singleton(PromptBuilder::class);
         $this->app->singleton(ResponseParser::class);
@@ -54,6 +58,7 @@ final class HackAuditorServiceProvider extends ServiceProvider
                 aiAdapter: $app->make(AIAdapter::class),
                 routeAnalyzer: $app->make(RouteAnalyzer::class),
                 runtimeIntrospector: $app->make(RuntimeIntrospector::class),
+                contextCollector: $app->make(ContextCollector::class),
             );
         });
 
@@ -77,25 +82,19 @@ final class HackAuditorServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        if (config('hack-auditor.history.enabled', true)) {
-            $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
-        }
-
         if ($this->app->runningInConsole()) {
             $this->commands([
                 HackScanCommand::class,
                 HackDemoCommand::class,
                 HackCTFCommand::class,
                 HackReportCommand::class,
+                HackHelpCommand::class,
+                HackUsageCommand::class,
             ]);
 
             $this->publishes([
                 __DIR__.'/../config/hack-auditor.php' => config_path('hack-auditor.php'),
             ], 'hack-auditor-config');
-
-            $this->publishes([
-                __DIR__.'/../database/migrations' => database_path('migrations'),
-            ], 'hack-auditor-migrations');
 
             $this->publishes([
                 __DIR__.'/../resources/stubs' => base_path('stubs/hack-auditor'),

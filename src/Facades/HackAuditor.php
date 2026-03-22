@@ -9,12 +9,13 @@ use Mahdi\HackAuditor\HackAuditorManager;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 
 /**
- * @method static VulnerabilityReport scan(?string $path = null)
+ * @method static VulnerabilityReport scan(?string $path = null, ?\Mahdi\HackAuditor\Support\UsageTracker $tracker = null)
  * @method static VulnerabilityReport scanCode(string $code)
  * @method static string generateCTF(string $type, ?string $code = null)
  * @method static int score()
+ * @method static \Mahdi\HackAuditor\Support\ScanHistory history()
  *
- * @see \Mahdi\HackAuditor\HackAuditorManager
+ * @see HackAuditorManager
  */
 final class HackAuditor extends Facade
 {

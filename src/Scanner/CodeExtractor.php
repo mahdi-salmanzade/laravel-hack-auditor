@@ -30,7 +30,7 @@ final class CodeExtractor
             ];
         }
 
-        $basePath = base_path() . DIRECTORY_SEPARATOR;
+        $basePath = base_path().DIRECTORY_SEPARATOR;
         $relativePath = str_starts_with($realPath, $basePath)
             ? substr($realPath, strlen($basePath))
             : $realPath;

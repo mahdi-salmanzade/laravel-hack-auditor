@@ -3,39 +3,36 @@
 declare(strict_types=1);
 
 use Mahdi\HackAuditor\AI\PromptBuilder;
-use Mahdi\HackAuditor\Support\VulnerabilityType;
 
 beforeEach(function (): void {
-    $this->builder = new PromptBuilder();
+    $this->builder = new PromptBuilder;
 });
 
-it('system prompt contains elite Laravel security auditor phrase', function (): void {
+it('system prompt contains Laravel security auditor phrase', function (): void {
     $prompt = $this->builder->systemPrompt();
 
-    expect($prompt)->toContain('elite Laravel security auditor');
+    expect($prompt)->toContain('Laravel security auditor');
 });
 
-it('system prompt references OWASP Top 10', function (): void {
+it('system prompt references context-first analysis', function (): void {
     $prompt = $this->builder->systemPrompt();
 
-    expect($prompt)->toContain('OWASP Top 10');
+    expect($prompt)->toContain('CONTEXT-FIRST ANALYSIS');
 });
 
-it('system prompt contains all 12 vulnerability type names', function (): void {
+it('system prompt contains key vulnerability categories', function (): void {
     $prompt = $this->builder->systemPrompt();
 
-    expect($prompt)->toContain('SQL Injection')
-        ->and($prompt)->toContain('XSS')
+    expect($prompt)->toContain('SQL injection')
         ->and($prompt)->toContain('CSRF')
-        ->and($prompt)->toContain('Mass Assignment')
+        ->and($prompt)->toContain('Mass assignment')
         ->and($prompt)->toContain('IDOR')
-        ->and($prompt)->toContain('Rate Limit')
-        ->and($prompt)->toContain('Auth Bypass')
-        ->and($prompt)->toContain('Insecure Deserialization')
-        ->and($prompt)->toContain('Open Redirect')
-        ->and($prompt)->toContain('Sensitive Data Exposure')
-        ->and($prompt)->toContain('Weak Password Hashing')
-        ->and($prompt)->toContain('Missing Validation');
+        ->and($prompt)->toContain('Rate limiting')
+        ->and($prompt)->toContain('authentication')
+        ->and($prompt)->toContain('Unserialization')
+        ->and($prompt)->toContain('Open redirect')
+        ->and($prompt)->toContain('sensitive data')
+        ->and($prompt)->toContain('Missing validation');
 });
 
 it('system prompt instructs to return valid JSON', function (): void {

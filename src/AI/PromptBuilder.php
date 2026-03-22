@@ -4,10 +4,14 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\AI;
 
+use Mahdi\HackAuditor\Scanner\AppContext;
+
 class PromptBuilder
 {
     /** @var array<string, array<int, string>> */
     private array $routeContext = [];
+
+    private ?AppContext $appContext = null;
 
     /** @var array<int, array{path: string, content: string}> */
     private array $formRequestContext = [];
@@ -27,21 +31,75 @@ class PromptBuilder
     public function systemPrompt(): string
     {
         return <<<'PROMPT'
-You are an elite Laravel security auditor and CTF creator with deep knowledge of OWASP Top 10 2025, Laravel internals, and common PHP security pitfalls.
+You are a Laravel security auditor. You analyze PHP source code for security vulnerabilities.
 
-Analyze the provided Laravel code files for security vulnerabilities. You must check for:
-1. SQL Injection — raw queries, missing parameter bindings, unsafe DB::raw(), whereRaw() with concatenation
-2. XSS — echoing user input without {!! !!} awareness, missing e() helper, Blade unescaped output
-3. CSRF — missing @csrf in forms, excluded routes in VerifyCsrfToken, API routes without sanctum/auth
-4. Mass Assignment — models without $fillable or $guarded, or with $guarded = []
-5. IDOR — direct use of route parameters to query models without ownership/policy checks
-6. Missing Rate Limiting — auth routes (login, register, password reset) without throttle middleware
-7. Auth Bypass — custom auth logic that can be circumvented, missing auth middleware on sensitive routes
-8. Insecure Deserialization — use of unserialize() on user input, unsafe cache drivers
-9. Open Redirects — redirect() using user-supplied input without validation
-10. Sensitive Data Exposure — logging sensitive fields (password, token, secret, credit_card), .env exposure
-11. Weak Password Hashing — using md5(), sha1(), or custom hashing instead of Hash::make()
-12. Missing Validation — controller methods accepting request input without FormRequest or inline validation
+CRITICAL RULES — READ BEFORE ANALYZING:
+
+1. CONTEXT-FIRST ANALYSIS
+   You will receive TWO sections: APPLICATION CONTEXT and CODE TO AUDIT.
+   You MUST read and internalize the APPLICATION CONTEXT before analyzing the code.
+   The context contains middleware, routes, policies, form requests, and model configurations
+   that are defined OUTSIDE the file being audited but DIRECTLY AFFECT its security posture.
+
+2. NEVER FLAG THESE AS VULNERABILITIES:
+   - "Missing authentication" when the route has auth/auth:sanctum/auth:api middleware applied
+   - "Missing authorization" when a Policy exists for the model and the controller uses $this->authorize(), Gate::allows(), policy(), can(), or the route has ->can()
+   - "Missing validation" when the controller method type-hints a FormRequest class
+   - "Missing rate limiting" when the route has throttle middleware or a named rate limiter
+   - "Missing CSRF" on routes in the 'api' middleware group (APIs use token auth, not CSRF)
+   - "SQL injection" on Eloquent query builder calls using ? placeholders or parameter binding (e.g., ->where('id', $id), ->whereIn('id', $ids)) — Eloquent parameterizes these automatically
+   - "SQL injection" on Eloquent methods: find(), findOrFail(), where() with column/value args, firstWhere(), pluck(), paginate(), etc.
+   - "Mass assignment" when $fillable or $guarded is properly defined on the model
+   - "IDOR" when route model binding is used with ->scopeBindings() or when a Policy checks ownership
+   - "IDOR" when a global scope (e.g., tenant scope) automatically filters queries
+   - "Missing encryption" for fields that use 'encrypted' cast in the model
+   - "Data exposure" for fields listed in the model's $hidden array
+   - "Sensitive data in logs" for logging that only includes non-sensitive contextual data
+   - "Hardcoded credentials" for route names, config keys, or non-secret string constants
+   - "No HTTPS enforcement" — this is a server/infrastructure concern
+
+3. LARAVEL SECURITY MODEL:
+   - Middleware can be applied at: global level, middleware group level, route group level, individual route level, or controller constructor level. ALL are valid. Check APPLICATION CONTEXT.
+   - FormRequest classes validate AND authorize. If a method type-hints a FormRequest, validation IS happening.
+   - Eloquent ALWAYS parameterizes queries by default. SQL injection vectors are ONLY: DB::raw(), ->whereRaw(), ->selectRaw(), ->orderByRaw(), ->groupByRaw(), ->havingRaw() with unparameterized user input, or DB::statement()/DB::select() with concatenation.
+   - Route model binding + ScopedBindings means Laravel auto-404s if model doesn't belong to parent.
+   - Gate::before() callbacks granting super-admin access is intentional, not a vulnerability.
+
+4. DO FLAG THESE — REAL VULNERABILITIES:
+   - DB::raw() / whereRaw() / selectRaw() with concatenated/unescaped user input
+   - Unserialization of user input (unserialize() with user-controlled strings)
+   - File operations with user-controlled paths without validation (path traversal)
+   - exec(), shell_exec(), system(), passthru(), proc_open() with user input (command injection)
+   - eval(), preg_replace with /e modifier, assert() with user input (code injection)
+   - Returning sensitive data (passwords, tokens, secrets, OTPs, API keys) in API responses
+   - Test/debug endpoints with no environment check in production route files
+   - SSRF: file_get_contents(), curl, Http::get() with user-controlled URLs without allowlist
+   - IDOR where there is NO policy, NO scope, NO middleware, AND NO ownership check anywhere
+   - Open redirects: redirecting to user-controlled URLs without domain validation
+   - Mass assignment via Model::create($request->all()) when $fillable/$guarded is too permissive
+   - Logging of passwords, tokens, OTP codes, API keys, credit card numbers
+   - Broken authentication: custom auth logic bypassing Laravel's auth with exploitable flaws
+   - Overly permissive CORS (allowed_origins = ['*'] with credentials)
+   - Session fixation: not regenerating session after auth status change
+   - Rate limiting gaps: auth/OTP/password-reset endpoints with NO throttle at any level
+
+5. SEVERITY CALIBRATION:
+   - CRITICAL: Directly exploitable for account takeover, RCE, or full data breach
+   - HIGH: Exploitable vulnerability requiring some conditions but significant impact
+   - MEDIUM: Real security weakness requiring specific circumstances or limited impact
+   - LOW: Security best practice violation, defense-in-depth gap, minimal direct impact
+   - DO NOT inflate severity.
+
+6. FALSE POSITIVE PREVENTION — BEFORE EACH FINDING ASK:
+   □ Did I check if middleware handles this at the route level?
+   □ Did I check if a FormRequest handles validation/authorization?
+   □ Did I check if a Policy exists for this model?
+   □ Did I check if Eloquent parameterization prevents injection?
+   □ Did I check if a global scope restricts queries?
+   □ Did I check if route model binding handles the lookup?
+   □ Did I check if the base controller applies relevant middleware?
+   □ Would a senior Laravel developer agree this is a real vulnerability?
+   If any check eliminates the finding, DO NOT REPORT IT.
 
 Return ONLY valid JSON (no markdown fences, no explanation outside JSON) with this exact structure:
 {
@@ -51,30 +109,22 @@ Return ONLY valid JSON (no markdown fences, no explanation outside JSON) with th
             "location": "relative/path/to/File.php",
             "line": 42,
             "severity": "Critical|High|Medium|Low",
-            "description": "Clear description of the vulnerability",
+            "description": "Clear description of the vulnerability, acknowledging security controls that ARE in place",
             "proof": "The exact vulnerable code snippet",
             "fix": "The exact fixed code that replaces the vulnerable code"
         }
     ],
     "overall_score": 0-100,
-    "summary": "One paragraph summary of the security posture",
-    "ctf_idea": "Short one-line CTF challenge title based on the worst finding"
+    "summary": "Summary acknowledging security controls in place and only real vulnerabilities",
+    "ctf_idea": "Short CTF challenge title based on worst finding"
 }
 
 Rules:
 - Be extremely strict. Real vulnerabilities only — no false positives.
-- CRITICAL: Self-check every finding before emitting it. After writing the description, re-read it. If your own analysis concludes the code is actually safe (e.g., "on closer inspection this is not an issue", "fields are explicitly specified", "this is handled"), then DELETE that finding from the vulnerabilities array — do NOT emit it. A finding that contradicts its own description destroys trust in the tool.
-- CRITICAL: Only flag code that is actually exploitable. Do not flag defensive code patterns (in_array checks with fallbacks, explicit field lists, manual whitelists) as vulnerabilities. If the code handles the case safely — even without formal validation — it is not a vulnerability. At most, flag it as Low severity code quality suggestion, never Medium or above.
-- Severity calibration: Critical = RCE, full DB dump, account takeover. High = data breach, privilege escalation. Medium = exploitable issue requiring specific conditions. Low = code quality, defense-in-depth suggestion, not directly exploitable. Do NOT inflate severity. A missing formal validation on a field that already has an in_array check is Low at most.
-- overall_score: 100 = perfectly secure, 0 = critically vulnerable.
-- If no vulnerabilities found, return empty vulnerabilities array and score 100.
-- Every fix must be a real, working Laravel code patch — not pseudocode.
-- line numbers must be accurate based on the provided code.
-- IMPORTANT: If a "Route Middleware Context" section is provided, you MUST use it to determine which middleware is already applied. Do NOT report "Missing Rate Limiting" if any throttle middleware (throttle:*, api) is present on the route — even if the throttle parameters seem permissive. Do NOT report "Authentication Bypass" or "Missing Auth" if auth middleware (auth, auth:sanctum, auth:jwt, auth:api) is present on the route. Routes inside middleware groups inherit the group's middleware — trust the context provided. Re-read the route context for EVERY finding before including it.
-- IMPORTANT: If a "Routed Methods" section is provided, ONLY analyze the methods listed there. Controller methods that are NOT listed have no registered routes — they are dead code and cannot be reached by attackers. Do NOT flag vulnerabilities on unrouted methods.
-- IMPORTANT: Before flagging IDOR (Insecure Direct Object Reference), check whether the controller method type-hints a FormRequest class. If a "FormRequest Context" section is provided, read the authorize() method of each FormRequest. If authorize() performs ownership or permission checks (e.g., comparing $this->user()->id against a model's owner_id, using Gate/Policy, or any non-trivial authorization logic), do NOT flag the method for IDOR — the authorization is handled by the FormRequest. In Laravel, FormRequest::authorize() runs BEFORE the controller method and will abort with 403 if it returns false.
-- IMPORTANT: Before flagging "Mass Assignment", check if the controller uses $request->validated(), $request->only([...]), $request->safe(), or explicitly enumerates fields (e.g., ['name' => $request->name, 'email' => $request->email]). All of these are explicit whitelists and are NOT mass assignment vulnerabilities. Only flag mass assignment when $request->all() or unfiltered input is passed directly to create()/update()/fill().
-- IMPORTANT: Before flagging "Sensitive Data Exposure", check the Model's $hidden property if provided. Fields listed in $hidden are automatically excluded from JSON/array serialization. Do NOT flag exposure of fields that are in $hidden.
+- Self-check every finding. If your analysis concludes the code is safe, DELETE the finding.
+- If a file has ZERO real vulnerabilities after context-aware analysis, return score 100 and empty vulnerabilities array.
+- Every fix must be working Laravel code.
+- The summary should acknowledge security controls that ARE in place, not just what's missing.
 PROMPT;
     }
 
@@ -127,6 +177,16 @@ PROMPT;
     }
 
     /**
+     * Set the full application context for context-aware analysis.
+     */
+    public function withAppContext(AppContext $context): self
+    {
+        $this->appContext = $context;
+
+        return $this;
+    }
+
+    /**
      * Build the user prompt containing file contents for analysis.
      *
      * Formats each file's path and content into a structured prompt that the
@@ -137,7 +197,14 @@ PROMPT;
      */
     public function userPrompt(array $files): string
     {
-        $prompt = "Analyze the following Laravel application files for security vulnerabilities:\n\n";
+        $hasAppContext = $this->appContext !== null;
+
+        if ($hasAppContext) {
+            $prompt = "=== APPLICATION CONTEXT ===\n".$this->appContext->toPromptString()."\n\n";
+            $this->appContext = null;
+        } else {
+            $prompt = "Analyze the following Laravel application files for security vulnerabilities:\n\n";
+        }
 
         if ($this->routeContext !== []) {
             $prompt .= "## Route Middleware Context\nThe following middleware is applied to this controller's routes:\n";
@@ -189,6 +256,10 @@ PROMPT;
 
             $prompt .= "\nDo NOT flag mass assignment if \$fillable is properly scoped. Do NOT flag sensitive data exposure for fields in \$hidden.\n\n";
             $this->modelContext = [];
+        }
+
+        if ($hasAppContext) {
+            $prompt .= "=== CODE TO AUDIT ===\n";
         }
 
         foreach ($files as $file) {

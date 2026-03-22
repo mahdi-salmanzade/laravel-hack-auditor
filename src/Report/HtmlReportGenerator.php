@@ -44,6 +44,7 @@ class HtmlReportGenerator
         $strokeOffset = self::RING_CIRCUMFERENCE * (1 - $score / 100);
 
         $findingsHtml = $this->buildFindingsHtml($report);
+        $usageHtml = $this->buildUsageHtml($report);
 
         $stub = File::get($this->stubPath());
 
@@ -62,6 +63,7 @@ class HtmlReportGenerator
             '{{PROVIDER}}' => $this->escape($provider),
             '{{SUMMARY}}' => $this->buildSummaryHtml($report->summary),
             '{{FINDINGS}}' => $findingsHtml,
+            '{{USAGE_SECTION}}' => $usageHtml,
         ];
 
         return str_replace(
@@ -119,6 +121,78 @@ class HtmlReportGenerator
         }
 
         return $html;
+    }
+
+    /**
+     * Build the token usage section HTML when usage data is available.
+     *
+     * Returns an empty string when no usage data is present, so the
+     * {{USAGE_SECTION}} placeholder is cleanly removed from the stub.
+     */
+    private function buildUsageHtml(VulnerabilityReport $report): string
+    {
+        if (! $report->hasUsageData()) {
+            return '';
+        }
+
+        $tracker = $report->getUsageTracker();
+        $promptTokens = number_format($tracker->getPromptTokens());
+        $completionTokens = number_format($tracker->getCompletionTokens());
+        $totalTokens = number_format($tracker->totalTokens());
+        $requests = (string) $tracker->getRequests();
+        $cost = sprintf('$%.4f', $tracker->estimateCost());
+        $duration = sprintf('%.1fs', $tracker->getElapsedSeconds());
+        $filesSkipped = $report->getFilesSkipped();
+
+        $cards = <<<HTML
+            <div class="meta-card">
+                <div class="meta-label">Token Usage</div>
+                <div class="meta-value mono">{$totalTokens}</div>
+            </div>
+            <div class="meta-card">
+                <div class="meta-label">Prompt / Completion</div>
+                <div class="meta-value mono">{$promptTokens} / {$completionTokens}</div>
+            </div>
+            <div class="meta-card">
+                <div class="meta-label">AI Requests</div>
+                <div class="meta-value">{$requests}</div>
+            </div>
+            <div class="meta-card">
+                <div class="meta-label">Estimated Cost</div>
+                <div class="meta-value mono">{$cost}</div>
+            </div>
+        HTML;
+
+        if ($tracker->isLimitSet()) {
+            $limit = number_format($tracker->getTokenLimit());
+            $percent = sprintf('%.1f%%', $tracker->getUsagePercent());
+            $cards .= <<<HTML
+
+                <div class="meta-card">
+                    <div class="meta-label">Budget Used</div>
+                    <div class="meta-value mono">{$percent} of {$limit}</div>
+                </div>
+            HTML;
+        }
+
+        if ($filesSkipped > 0) {
+            $cards .= <<<HTML
+
+                <div class="meta-card">
+                    <div class="meta-label">Files Skipped</div>
+                    <div class="meta-value" style="color:var(--high)">{$filesSkipped}</div>
+                </div>
+            HTML;
+        }
+
+        return <<<HTML
+
+            <!-- Token Usage -->
+            <div style="margin-top:8px;margin-bottom:4px;font-size:12px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-dim)">Token Usage</div>
+            <div class="meta-grid">
+                {$cards}
+            </div>
+        HTML;
     }
 
     /**

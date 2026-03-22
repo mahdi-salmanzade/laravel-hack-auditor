@@ -209,4 +209,119 @@ final class FileCollector
 
         return str_contains($chunk, "\0");
     }
+
+    /**
+     * Collect paths to context files needed for security-aware scanning.
+     *
+     * Returns absolute paths to files that provide security context:
+     * route files, middleware, policies, form requests, models, providers,
+     * config files, and base controllers. These are READ for context, not
+     * scanned for vulnerabilities.
+     *
+     * @return array<string, array<int, string>> Category => file paths
+     */
+    public function collectContextFiles(): array
+    {
+        $basePath = base_path();
+        $context = [];
+
+        // Route files
+        $routeFiles = $this->globFiles($basePath.'/routes', '*.php');
+        if ($routeFiles !== []) {
+            $context['routes'] = $routeFiles;
+        }
+
+        // Bootstrap/Kernel (detect Laravel version)
+        $bootstrapApp = $basePath.'/bootstrap/app.php';
+        $kernel = $basePath.'/app/Http/Kernel.php';
+        if (file_exists($bootstrapApp)) {
+            $context['bootstrap'] = [$bootstrapApp];
+        }
+        if (file_exists($kernel)) {
+            $context['kernel'] = [$kernel];
+        }
+
+        // Middleware
+        $middlewareFiles = $this->globFiles($basePath.'/app/Http/Middleware', '*.php');
+        if ($middlewareFiles !== []) {
+            $context['middleware'] = $middlewareFiles;
+        }
+
+        // Policies
+        $policyFiles = $this->globFiles($basePath.'/app/Policies', '*.php');
+        if ($policyFiles !== []) {
+            $context['policies'] = $policyFiles;
+        }
+
+        // Form Requests
+        $requestFiles = $this->globFiles($basePath.'/app/Http/Requests', '*.php');
+        if ($requestFiles !== []) {
+            $context['form_requests'] = $requestFiles;
+        }
+
+        // Models
+        $modelFiles = $this->globFiles($basePath.'/app/Models', '*.php');
+        if ($modelFiles !== []) {
+            $context['models'] = $modelFiles;
+        }
+
+        // Service Providers
+        $providerFiles = [];
+        foreach (['AuthServiceProvider.php', 'AppServiceProvider.php', 'RouteServiceProvider.php'] as $provider) {
+            $path = $basePath.'/app/Providers/'.$provider;
+            if (file_exists($path)) {
+                $providerFiles[] = $path;
+            }
+        }
+        if ($providerFiles !== []) {
+            $context['providers'] = $providerFiles;
+        }
+
+        // Config files
+        $configFiles = [];
+        foreach (['auth.php', 'cors.php', 'session.php', 'sanctum.php'] as $config) {
+            $path = $basePath.'/config/'.$config;
+            if (file_exists($path)) {
+                $configFiles[] = $path;
+            }
+        }
+        if ($configFiles !== []) {
+            $context['config'] = $configFiles;
+        }
+
+        // Base controller
+        $baseController = $basePath.'/app/Http/Controllers/Controller.php';
+        if (file_exists($baseController)) {
+            $context['base_controller'] = [$baseController];
+        }
+
+        // Extra context paths from config
+        $extraPaths = config('hack-auditor.context.extra_context_paths', []);
+        if (is_array($extraPaths)) {
+            foreach ($extraPaths as $extraPath) {
+                $absolutePath = $basePath.'/'.ltrim($extraPath, '/');
+                if (file_exists($absolutePath)) {
+                    $context['extra'][] = $absolutePath;
+                }
+            }
+        }
+
+        return $context;
+    }
+
+    /**
+     * Find files matching a glob pattern in a directory.
+     *
+     * @return array<int, string>
+     */
+    private function globFiles(string $directory, string $pattern): array
+    {
+        if (! is_dir($directory)) {
+            return [];
+        }
+
+        $files = glob($directory.DIRECTORY_SEPARATOR.$pattern);
+
+        return $files === false ? [] : $files;
+    }
 }

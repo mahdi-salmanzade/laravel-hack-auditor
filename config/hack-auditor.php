@@ -133,6 +133,29 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Context-Aware Scanning
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, the scanner collects security-relevant context from your
+    | application (routes, middleware, policies, form requests, models) before
+    | sending code to the AI. This dramatically reduces false positives by
+    | giving the AI full visibility into your security architecture.
+    |
+    */
+
+    'context' => [
+        'enabled' => true,
+        'max_context_tokens' => 8000,
+        'include_routes' => true,
+        'include_middleware' => true,
+        'include_policies' => true,
+        'include_form_requests' => true,
+        'include_models' => true,
+        'extra_context_paths' => [],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Severity Settings
     |--------------------------------------------------------------------------
     |
@@ -176,21 +199,6 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Scan History Settings
-    |--------------------------------------------------------------------------
-    |
-    | Control whether scan results are persisted and how long they are kept.
-    | History allows you to track security improvements over time.
-    |
-    */
-
-    'history' => [
-        'enabled' => false,
-        'keep_days' => 30,
-    ],
-
-    /*
-    |--------------------------------------------------------------------------
     | Sharing Settings
     |--------------------------------------------------------------------------
     |
@@ -205,6 +213,28 @@ return [
             '#CTF',
         ],
         'ai_tweets' => true,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Token Usage & Cost Tracking
+    |--------------------------------------------------------------------------
+    |
+    | Track token consumption and estimated costs for AI scan requests.
+    | The default limit of 0 means unlimited. Use --limit on the command
+    | or set HACK_AUDITOR_TOKEN_LIMIT in .env to enforce a budget.
+    |
+    | Cost rates are per 1M tokens and default to Claude Sonnet pricing.
+    | Adjust to match your AI provider's rates.
+    |
+    */
+
+    'usage' => [
+        'default_limit' => (int) env('HACK_AUDITOR_TOKEN_LIMIT', 0),
+        'cost_per_1m_input' => (float) env('HACK_AUDITOR_COST_INPUT', 3.00),
+        'cost_per_1m_output' => (float) env('HACK_AUDITOR_COST_OUTPUT', 15.00),
+        'show_usage' => true,
+        'log_enabled' => true,
     ],
 
 ];

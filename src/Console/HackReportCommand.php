@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
-use Mahdi\HackAuditor\Models\ScanResult;
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
+use Mahdi\HackAuditor\Support\ScanHistory;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
 
@@ -36,25 +36,25 @@ final class HackReportCommand extends Command
      */
     public function handle(): int
     {
-        $scanResult = $this->resolveScanResult();
+        $scanData = $this->resolveScanData();
 
-        if ($scanResult === null) {
+        if ($scanData === null) {
             return self::FAILURE;
         }
 
-        $report = $this->buildReport($scanResult);
+        $report = $this->buildReportFromArray($scanData);
 
         /** @var HtmlReportGenerator $generator */
         $generator = app(HtmlReportGenerator::class);
 
         $html = $generator->generate($report, [
-            'scanned_at' => $scanResult->created_at?->format('Y-m-d H:i:s') ?? 'Unknown',
-            'duration' => $scanResult->scan_duration_ms !== null
-                ? round($scanResult->scan_duration_ms / 1000, 1).'s'
+            'scanned_at' => $scanData['created_at'] ?? 'Unknown',
+            'duration' => isset($scanData['scan_duration_ms'])
+                ? round((int) $scanData['scan_duration_ms'] / 1000, 1).'s'
                 : 'N/A',
-            'provider' => $scanResult->ai_provider ?? 'Unknown',
-            'model' => $scanResult->ai_model ?? 'Unknown',
-            'total_files' => $scanResult->files_scanned ?? 0,
+            'provider' => $scanData['ai_provider'] ?? 'Unknown',
+            'model' => $scanData['ai_model'] ?? 'Unknown',
+            'total_files' => $scanData['files_scanned'] ?? 0,
         ]);
 
         $outputPath = $this->resolveOutputPath();
@@ -73,51 +73,48 @@ final class HackReportCommand extends Command
     }
 
     /**
-     * Resolve the scan result from the database.
+     * Resolve the scan data from JSON files.
+     *
+     * @return array<string, mixed>|null
      */
-    private function resolveScanResult(): ?ScanResult
+    private function resolveScanData(): ?array
     {
-        try {
-            $id = $this->option('id');
+        $history = new ScanHistory;
 
-            if (is_string($id) && $id !== '') {
-                /** @var ScanResult|null $result */
-                $result = ScanResult::query()->find($id);
+        $id = $this->option('id');
 
-                if ($result === null) {
-                    $this->components->error("No scan found with ID: {$id}");
-
-                    return null;
-                }
-
-                return $result;
-            }
-
-            /** @var ScanResult|null $result */
-            $result = ScanResult::query()->latest()->first();
+        if (is_string($id) && $id !== '') {
+            $result = $history->find($id);
 
             if ($result === null) {
-                $this->components->error('No saved scan results found. Run `php artisan hack:scan --save` first.');
+                $this->components->error("No scan found with ID: {$id}");
 
                 return null;
             }
 
             return $result;
-        } catch (\Throwable $e) {
-            $this->components->error("Failed to load scan results: {$e->getMessage()}");
-            $this->components->warn('Have you run the migrations? Try: php artisan migrate');
+        }
+
+        $result = $history->latest();
+
+        if ($result === null) {
+            $this->components->error('No saved scan results found. Run `php artisan hack:scan --save` first.');
 
             return null;
         }
+
+        return $result;
     }
 
     /**
-     * Build a VulnerabilityReport from a saved ScanResult.
+     * Build a VulnerabilityReport from saved scan data.
+     *
+     * @param  array<string, mixed>  $scanData
      */
-    private function buildReport(ScanResult $scanResult): VulnerabilityReport
+    private function buildReportFromArray(array $scanData): VulnerabilityReport
     {
         /** @var array<int, array<string, mixed>> $vulnData */
-        $vulnData = is_array($scanResult->vulnerabilities) ? $scanResult->vulnerabilities : [];
+        $vulnData = is_array($scanData['vulnerabilities'] ?? null) ? $scanData['vulnerabilities'] : [];
 
         $vulnerabilities = array_map(function (array $data): Vulnerability {
             return new Vulnerability(
@@ -133,8 +130,8 @@ final class HackReportCommand extends Command
 
         return new VulnerabilityReport(
             vulnerabilities: $vulnerabilities,
-            overallScore: $scanResult->score,
-            summary: $scanResult->summary ?? '',
+            overallScore: (int) ($scanData['overall_score'] ?? 0),
+            summary: (string) ($scanData['summary'] ?? ''),
             ctfIdea: '',
         );
     }

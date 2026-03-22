@@ -6,10 +6,9 @@ use Illuminate\Support\Facades\File;
 use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\CTF\CTFGenerator;
-use Mahdi\HackAuditor\Exceptions\InvalidAIResponseException;
 
 beforeEach(function (): void {
-    $this->outputBase = sys_get_temp_dir() . '/hack-auditor-ctf-test-' . uniqid();
+    $this->outputBase = sys_get_temp_dir().'/hack-auditor-ctf-test-'.uniqid();
     mkdir($this->outputBase, 0755, true);
 
     // Override storage_path to use our temp directory

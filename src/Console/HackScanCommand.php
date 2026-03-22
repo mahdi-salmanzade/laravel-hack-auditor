@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
+
+use function Laravel\Prompts\spin;
+
 use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
-use Mahdi\HackAuditor\Models\ScanResult;
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
 use Mahdi\HackAuditor\Scanner\Baseline;
 use Mahdi\HackAuditor\Scanner\CodeExtractor;
@@ -17,10 +19,12 @@ use Mahdi\HackAuditor\Scanner\GitDiffCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
+use Mahdi\HackAuditor\Support\AiProviders;
+use Mahdi\HackAuditor\Support\ScanHistory;
 use Mahdi\HackAuditor\Support\SeverityLevel;
+use Mahdi\HackAuditor\Support\UsageLog;
+use Mahdi\HackAuditor\Support\UsageTracker;
 use SplFileInfo;
-
-use function Laravel\Prompts\spin;
 
 final class HackScanCommand extends Command
 {
@@ -42,7 +46,8 @@ final class HackScanCommand extends Command
         {--base= : Base branch for --diff comparison (default: auto-detect main/master)}
         {--baseline : Apply baseline to suppress known findings (on by default if file exists)}
         {--no-baseline : Ignore the baseline file}
-        {--update-baseline : Save current findings as the new baseline}';
+        {--update-baseline : Save current findings as the new baseline}
+        {--limit= : Maximum token budget for this scan (stops scanning when reached)}';
 
     /**
      * The console command description.
@@ -82,6 +87,15 @@ final class HackScanCommand extends Command
 
         /** @var HackScanner $scanner */
         $scanner = app(HackScanner::class);
+
+        // Set up usage tracking with auto-detected pricing
+        $tokenLimit = (int) ($this->option('limit') ?: config('hack-auditor.usage.default_limit', 0));
+        $tracker = UsageTracker::forCurrentConfig($tokenLimit);
+        $scanner->setUsageTracker($tracker);
+
+        if (! $this->option('json') && $tracker->isLimitSet()) {
+            $this->line('  <fg=gray>limit</>    '.number_format($tracker->getTokenLimit()).' tokens');
+        }
 
         $path = $this->option('path');
 
@@ -172,7 +186,33 @@ final class HackScanCommand extends Command
             $this->generateHtmlReport($report, $elapsedMs);
         }
 
+        // Log usage data
+        if (config('hack-auditor.usage.log_enabled', true) && $report->hasUsageData()) {
+            try {
+                $usageLog = new UsageLog;
+                $detectedPricing = AiProviders::detectPricing();
+                $usageLog->record($report->getUsageTracker(), [
+                    'files_skipped' => $report->getFilesSkipped(),
+                    'path' => is_string($this->option('path')) ? $this->option('path') : null,
+                    'score' => $report->overallScore,
+                    'provider' => $detectedPricing['provider'],
+                    'model' => $detectedPricing['model'],
+                ]);
+            } catch (\Throwable) {
+                // Usage logging is best-effort
+            }
+        }
+
         $this->displayScanComparison($report);
+
+        $this->displayUsageSummary($report);
+
+        if ($report->getFilesSkipped() > 0) {
+            $this->components->warn(
+                "Token limit reached — {$report->getFilesSkipped()} file(s) skipped. "
+                .'Increase with --limit or remove the flag for unlimited.'
+            );
+        }
 
         $this->components->info('Run `<fg=cyan>php artisan hack:ctf</>` to generate CTF challenges from these findings');
 
@@ -425,43 +465,39 @@ final class HackScanCommand extends Command
             ),
         ];
 
+        if ($report->hasUsageData()) {
+            $output['usage'] = $report->getUsageTracker()->toArray();
+            $output['files_skipped'] = $report->getFilesSkipped();
+        }
+
         $this->line((string) json_encode($output, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 
         return $report->hasCritical() ? self::FAILURE : self::SUCCESS;
     }
 
     /**
-     * Persist scan results to the database.
+     * Save scan results to a JSON file.
      */
     private function saveResults(VulnerabilityReport $report, int $elapsedMs): void
     {
         try {
-            ScanResult::create([
-                'score' => $report->overallScore,
-                'total_vulnerabilities' => $report->totalCount(),
-                'critical_count' => $report->criticalCount(),
-                'high_count' => $report->highCount(),
-                'medium_count' => $report->mediumCount(),
-                'low_count' => $report->lowCount(),
-                'vulnerabilities' => array_map(
-                    fn (Vulnerability $v): array => $v->toArray(),
-                    $report->vulnerabilities,
-                ),
-                'summary' => $report->summary,
-                'files_scanned' => count(array_unique(array_map(
-                    fn (Vulnerability $v): string => $v->location,
-                    $report->vulnerabilities,
-                ))),
-                'scan_duration_ms' => $elapsedMs,
-                'ai_provider' => config('hack-auditor.ai.provider'),
-                'ai_model' => config('hack-auditor.ai.model'),
-                'laravel_version' => app()->version(),
-            ]);
+            $history = new ScanHistory;
+            $data = $report->toArray();
+            $data['scan_duration_ms'] = $elapsedMs;
+            $data['ai_provider'] = config('hack-auditor.ai.provider');
+            $data['ai_model'] = config('hack-auditor.ai.model');
+            $data['laravel_version'] = app()->version();
 
-            $this->components->info('Scan results saved to database');
+            if ($report->hasUsageData()) {
+                $data['usage'] = $report->getUsageTracker()->toArray();
+                $data['files_skipped'] = $report->getFilesSkipped();
+            }
+
+            $id = $history->save($data);
+
+            $this->components->info("Scan saved: <fg=cyan>{$id}</>");
         } catch (\Throwable $e) {
             $this->components->error("Failed to save results: {$e->getMessage()}");
-            $this->components->warn('Have you run the migrations? Try: php artisan migrate');
         }
     }
 
@@ -619,30 +655,20 @@ final class HackScanCommand extends Command
     }
 
     /**
-     * Display scan comparison with previous scan if history is enabled.
+     * Display scan comparison with previous scan if saved scans exist.
      */
     private function displayScanComparison(VulnerabilityReport $report): void
     {
-        if (! config('hack-auditor.history.enabled', false)) {
-            return;
-        }
-
         try {
-            /** @var ScanResult|null $previous */
-            $previous = ScanResult::query()->latest()->first();
+            $history = new ScanHistory;
+            $previous = $history->latest();
 
             if ($previous === null) {
                 return;
             }
 
-            $previousReport = new VulnerabilityReport(
-                vulnerabilities: [],
-                overallScore: $previous->score,
-                summary: '',
-                ctfIdea: '',
-            );
-
-            $delta = $report->overallScore - $previous->score;
+            $previousScore = (int) ($previous['overall_score'] ?? 0);
+            $delta = $report->overallScore - $previousScore;
             $deltaSign = $delta > 0 ? '+' : '';
             $deltaColor = $delta > 0 ? 'green' : ($delta < 0 ? 'red' : 'gray');
 
@@ -650,6 +676,88 @@ final class HackScanCommand extends Command
             $this->line("  <fg={$deltaColor}>Score: {$report->overallScore}/100 ({$deltaSign}{$delta} since last scan)</>");
         } catch (\Throwable) {
             // History comparison is best-effort
+        }
+    }
+
+    /**
+     * Display token usage summary after scan results.
+     */
+    private function displayUsageSummary(VulnerabilityReport $report): void
+    {
+        if (! $report->hasUsageData()) {
+            return;
+        }
+
+        if (! config('hack-auditor.usage.show_usage', true)) {
+            return;
+        }
+
+        $tracker = $report->getUsageTracker();
+        $this->newLine();
+
+        $this->components->twoColumnDetail(
+            '<fg=gray>Token Usage</>',
+            sprintf(
+                '<fg=cyan>%s</> prompt + <fg=cyan>%s</> completion = <fg=white;options=bold>%s</> total',
+                number_format($tracker->getPromptTokens()),
+                number_format($tracker->getCompletionTokens()),
+                number_format($tracker->totalTokens()),
+            ),
+        );
+
+        $this->components->twoColumnDetail(
+            '<fg=gray>AI Requests</>',
+            (string) $tracker->getRequests(),
+        );
+
+        $cost = $tracker->estimateCost();
+        if ($cost > 0) {
+            $this->components->twoColumnDetail(
+                '<fg=gray>Estimated Cost</>',
+                sprintf('<fg=yellow>$%.4f</>', $cost),
+            );
+        }
+
+        $this->components->twoColumnDetail(
+            '<fg=gray>Scan Duration</>',
+            sprintf('%.1fs', $tracker->getElapsedSeconds()),
+        );
+
+        $pricing = AiProviders::detectPricing();
+        if ($pricing['provider'] !== null) {
+            $modelInfo = AiProviders::model($pricing['provider'], $pricing['model'] ?? '');
+            $modelName = $modelInfo['name'] ?? $pricing['model'];
+
+            $this->components->twoColumnDetail(
+                '<fg=gray>Model</>',
+                sprintf('%s <fg=gray>(%s)</>',  $modelName, $pricing['provider']),
+            );
+
+            $this->components->twoColumnDetail(
+                '<fg=gray>Rates</>',
+                sprintf(
+                    '<fg=gray>$%.2f / $%.2f per 1M tokens (%s)</>',
+                    $pricing['input'],
+                    $pricing['output'],
+                    $pricing['source'],
+                ),
+            );
+        }
+
+        if ($tracker->isLimitSet()) {
+            $percent = $tracker->getUsagePercent();
+            $color = $percent > 90 ? 'red' : ($percent > 70 ? 'yellow' : 'green');
+
+            $this->components->twoColumnDetail(
+                '<fg=gray>Budget Used</>',
+                sprintf(
+                    '<fg=%s>%.1f%%</> (%s / %s tokens)',
+                    $color,
+                    $percent,
+                    number_format($tracker->totalTokens()),
+                    number_format($tracker->getTokenLimit()),
+                ),
+            );
         }
     }
 

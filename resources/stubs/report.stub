@@ -886,6 +886,8 @@ body {
         </div>
     </div>
 
+    {{USAGE_SECTION}}
+
     <!-- Summary -->
     <section class="summary-section">
         <div class="section-heading">Executive Summary</div>

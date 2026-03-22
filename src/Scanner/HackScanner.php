@@ -8,6 +8,7 @@ use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Contracts\ScannerInterface;
+use Mahdi\HackAuditor\Support\UsageTracker;
 use SplFileInfo;
 
 final class HackScanner implements ScannerInterface
@@ -23,7 +24,23 @@ final class HackScanner implements ScannerInterface
         private readonly AIAdapter $aiAdapter,
         private readonly ?RouteAnalyzer $routeAnalyzer = null,
         private readonly ?RuntimeIntrospector $runtimeIntrospector = null,
+        private readonly ?ContextCollector $contextCollector = null,
     ) {}
+
+    private ?AppContext $appContext = null;
+
+    private ?UsageTracker $usageTracker = null;
+
+    private int $filesSkipped = 0;
+
+    /**
+     * Set the usage tracker for token consumption monitoring.
+     */
+    public function setUsageTracker(UsageTracker $tracker): void
+    {
+        $this->usageTracker = $tracker;
+        $this->filesSkipped = 0;
+    }
 
     /**
      * Scan the entire application for security vulnerabilities.
@@ -46,6 +63,9 @@ final class HackScanner implements ScannerInterface
         }
 
         $chunks = $this->codeExtractor->chunk($files);
+
+        // Collect context once using all controller files from all chunks
+        $this->collectAppContext($chunks);
 
         return $this->scanChunks($chunks);
     }
@@ -71,7 +91,18 @@ final class HackScanner implements ScannerInterface
         $file = new SplFileInfo($absolutePath);
         $extracted = $this->codeExtractor->extract($file);
 
-        return $this->analyzeFiles([$extracted]);
+        // Collect context for single file scan
+        if ($this->contextCollector !== null && $extracted['type'] === 'controller') {
+            $this->appContext = $this->contextCollector->collect([$extracted]);
+        }
+
+        $report = $this->analyzeFiles([$extracted]);
+
+        if ($this->usageTracker !== null) {
+            $report->setUsageTracker($this->usageTracker);
+        }
+
+        return $report;
     }
 
     /**
@@ -85,7 +116,13 @@ final class HackScanner implements ScannerInterface
             'type' => 'other',
         ];
 
-        return $this->analyzeFiles([$fileData]);
+        $report = $this->analyzeFiles([$fileData]);
+
+        if ($this->usageTracker !== null) {
+            $report->setUsageTracker($this->usageTracker);
+        }
+
+        return $report;
     }
 
     /**
@@ -99,10 +136,69 @@ final class HackScanner implements ScannerInterface
         $reports = [];
 
         foreach ($chunks as $chunk) {
+            if ($this->usageTracker !== null && $this->usageTracker->isLimitSet()) {
+                $estimatedTokens = $this->estimateChunkTokens($chunk) + 4000;
+
+                if ($this->usageTracker->wouldExceedLimit($estimatedTokens)) {
+                    $this->filesSkipped += count($chunk);
+
+                    continue;
+                }
+            }
+
             $reports[] = $this->analyzeFiles($chunk);
         }
 
-        return $this->mergeReports($reports);
+        $report = $this->mergeReports($reports);
+
+        if ($this->usageTracker !== null) {
+            $report->setUsageTracker($this->usageTracker);
+            $report->setFilesSkipped($this->filesSkipped);
+        }
+
+        return $report;
+    }
+
+    /**
+     * Collect application context once from all controller files across chunks.
+     *
+     * @param  array<int, array<int, array{path: string, content: string, type: string}>>  $chunks
+     */
+    private function collectAppContext(array $chunks): void
+    {
+        if ($this->contextCollector === null) {
+            return;
+        }
+
+        // Flatten all controller files from all chunks
+        $controllerFiles = [];
+        foreach ($chunks as $chunk) {
+            foreach ($chunk as $file) {
+                if ($file['type'] === 'controller') {
+                    $controllerFiles[] = $file;
+                }
+            }
+        }
+
+        $this->appContext = $this->contextCollector->collect($controllerFiles);
+    }
+
+    /**
+     * Estimate the total tokens for a chunk of files.
+     *
+     * Uses ~4 chars per token as a conservative approximation.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $chunk
+     */
+    private function estimateChunkTokens(array $chunk): int
+    {
+        $totalChars = 0;
+
+        foreach ($chunk as $file) {
+            $totalChars += strlen($file['content']);
+        }
+
+        return (int) ceil($totalChars / 4);
     }
 
     /**
@@ -121,8 +217,23 @@ final class HackScanner implements ScannerInterface
         $this->injectFormRequestContext($files);
         $this->injectModelContext($files);
 
+        if ($this->appContext !== null) {
+            $this->promptBuilder->withAppContext($this->appContext);
+        }
+
         $systemPrompt = $this->promptBuilder->systemPrompt();
         $userPrompt = $this->promptBuilder->userPrompt($files);
+
+        if ($this->usageTracker !== null) {
+            $result = $this->aiAdapter->sendWithUsage($systemPrompt, $userPrompt);
+
+            $this->usageTracker->record(
+                $result['usage']['prompt_tokens'],
+                $result['usage']['completion_tokens'],
+            );
+
+            return $this->responseParser->parse($result['text']);
+        }
 
         $response = $this->aiAdapter->send($systemPrompt, $userPrompt);
 

@@ -3,6 +3,22 @@
 declare(strict_types=1);
 
 use Mahdi\HackAuditor\AI\AIAdapter;
+use Mockery\MockInterface;
+
+/**
+ * Build a mock AIAdapter that handles both send() and sendWithUsage().
+ */
+function mockAIAdapterForScan(string $response): MockInterface
+{
+    $mock = Mockery::mock(AIAdapter::class);
+    $mock->shouldReceive('send')->andReturn($response);
+    $mock->shouldReceive('sendWithUsage')->andReturn([
+        'text' => $response,
+        'usage' => ['prompt_tokens' => 100, 'completion_tokens' => 50],
+    ]);
+
+    return $mock;
+}
 
 function buildScanAIResponse(int $score = 75, array $vulnerabilities = []): string
 {
@@ -88,88 +104,69 @@ afterEach(function (): void {
 });
 
 it('command runs successfully with mocked AI adapter', function (): void {
-    $mockAdapter = Mockery::mock(AIAdapter::class);
-    $mockAdapter->shouldReceive('send')
-        ->andReturn(json_encode([
-            'vulnerabilities' => [],
-            'overall_score' => 85,
-            'summary' => 'No issues found.',
-            'ctf_idea' => '',
-        ], JSON_THROW_ON_ERROR));
+    $response = json_encode([
+        'vulnerabilities' => [],
+        'overall_score' => 85,
+        'summary' => 'No issues found.',
+        'ctf_idea' => '',
+    ], JSON_THROW_ON_ERROR);
 
-    $this->app->instance(AIAdapter::class, $mockAdapter);
+    $this->app->instance(AIAdapter::class, mockAIAdapterForScan($response));
 
     $this->artisan('hack:scan')
         ->assertSuccessful();
 });
 
 it('command with --json flag outputs valid JSON', function (): void {
-    $mockAdapter = Mockery::mock(AIAdapter::class);
-    $mockAdapter->shouldReceive('send')
-        ->andReturn(buildScanAIResponse());
-
-    $this->app->instance(AIAdapter::class, $mockAdapter);
+    $this->app->instance(AIAdapter::class, mockAIAdapterForScan(buildScanAIResponse()));
 
     $this->artisan('hack:scan', ['--json' => true])
         ->expectsOutputToContain('"overall_score"');
 });
 
 it('command with --severity flag filters results by minimum severity', function (): void {
-    $mockAdapter = Mockery::mock(AIAdapter::class);
-    $mockAdapter->shouldReceive('send')
-        ->andReturn(buildScanAIResponse());
+    $this->app->instance(AIAdapter::class, mockAIAdapterForScan(buildScanAIResponse()));
 
-    $this->app->instance(AIAdapter::class, $mockAdapter);
-
-    // When filtering to Critical only, the JSON output should reflect fewer vulns
     $result = $this->artisan('hack:scan', ['--json' => true, '--severity' => 'Critical']);
 
     $result->expectsOutputToContain('"overall_score"');
 });
 
 it('command returns failure exit code when critical vulnerabilities are found', function (): void {
-    $mockAdapter = Mockery::mock(AIAdapter::class);
-    $mockAdapter->shouldReceive('send')
-        ->andReturn(buildScanAIResponse(score: 15));
-
-    $this->app->instance(AIAdapter::class, $mockAdapter);
+    $this->app->instance(AIAdapter::class, mockAIAdapterForScan(buildScanAIResponse(score: 15)));
 
     $this->artisan('hack:scan', ['--json' => true])
         ->assertFailed();
 });
 
 it('command returns success exit code when no critical vulnerabilities are found', function (): void {
-    $mockAdapter = Mockery::mock(AIAdapter::class);
-    $mockAdapter->shouldReceive('send')
-        ->andReturn(buildScanAIResponse(score: 90, vulnerabilities: [
-            [
-                'type' => 'missing_validation',
-                'location' => 'app/Http/Controllers/TestController.php',
-                'line' => 5,
-                'severity' => 'low',
-                'description' => 'Missing validation.',
-                'proof' => '$request->all()',
-                'fix' => '$request->validated()',
-            ],
-        ]));
+    $response = buildScanAIResponse(score: 90, vulnerabilities: [
+        [
+            'type' => 'missing_validation',
+            'location' => 'app/Http/Controllers/TestController.php',
+            'line' => 5,
+            'severity' => 'low',
+            'description' => 'Missing validation.',
+            'proof' => '$request->all()',
+            'fix' => '$request->validated()',
+        ],
+    ]);
 
-    $this->app->instance(AIAdapter::class, $mockAdapter);
+    $this->app->instance(AIAdapter::class, mockAIAdapterForScan($response));
 
     $this->artisan('hack:scan', ['--json' => true])
         ->assertSuccessful();
 });
 
 it('command output contains banner when not using --json flag', function (): void {
-    $mockAdapter = Mockery::mock(AIAdapter::class);
-    $mockAdapter->shouldReceive('send')
-        ->andReturn(json_encode([
-            'vulnerabilities' => [],
-            'overall_score' => 100,
-            'summary' => 'No issues found.',
-            'ctf_idea' => '',
-        ], JSON_THROW_ON_ERROR));
+    $response = json_encode([
+        'vulnerabilities' => [],
+        'overall_score' => 100,
+        'summary' => 'No issues found.',
+        'ctf_idea' => '',
+    ], JSON_THROW_ON_ERROR);
 
-    $this->app->instance(AIAdapter::class, $mockAdapter);
+    $this->app->instance(AIAdapter::class, mockAIAdapterForScan($response));
 
     $this->artisan('hack:scan')
         ->expectsOutputToContain('Collecting files...')
@@ -177,22 +174,14 @@ it('command output contains banner when not using --json flag', function (): voi
 });
 
 it('json output contains scan_duration_ms field', function (): void {
-    $mockAdapter = Mockery::mock(AIAdapter::class);
-    $mockAdapter->shouldReceive('send')
-        ->andReturn(buildScanAIResponse(score: 100, vulnerabilities: []));
-
-    $this->app->instance(AIAdapter::class, $mockAdapter);
+    $this->app->instance(AIAdapter::class, mockAIAdapterForScan(buildScanAIResponse(score: 100, vulnerabilities: [])));
 
     $this->artisan('hack:scan', ['--json' => true])
         ->expectsOutputToContain('"scan_duration_ms"');
 });
 
 it('json output contains counts object', function (): void {
-    $mockAdapter = Mockery::mock(AIAdapter::class);
-    $mockAdapter->shouldReceive('send')
-        ->andReturn(buildScanAIResponse());
-
-    $this->app->instance(AIAdapter::class, $mockAdapter);
+    $this->app->instance(AIAdapter::class, mockAIAdapterForScan(buildScanAIResponse()));
 
     $this->artisan('hack:scan', ['--json' => true])
         ->expectsOutputToContain('"counts"');

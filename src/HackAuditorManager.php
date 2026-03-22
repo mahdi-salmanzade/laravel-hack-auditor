@@ -6,10 +6,11 @@ namespace Mahdi\HackAuditor;
 
 use Illuminate\Contracts\Container\Container;
 use Mahdi\HackAuditor\CTF\CTFGenerator;
-use Mahdi\HackAuditor\Models\ScanResult;
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
 use Mahdi\HackAuditor\Scanner\HackScanner;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
+use Mahdi\HackAuditor\Support\ScanHistory;
+use Mahdi\HackAuditor\Support\UsageTracker;
 
 final class HackAuditorManager
 {
@@ -31,9 +32,14 @@ final class HackAuditorManager
      *
      * When a path is provided, only that file is scanned. Otherwise,
      * a full application scan is performed using configured paths.
+     * An optional UsageTracker can be provided to monitor token consumption.
      */
-    public function scan(?string $path = null): VulnerabilityReport
+    public function scan(?string $path = null, ?UsageTracker $tracker = null): VulnerabilityReport
     {
+        if ($tracker !== null) {
+            $this->scanner->setUsageTracker($tracker);
+        }
+
         if ($path !== null) {
             return $this->scanner->scanFile($path);
         }
@@ -73,13 +79,21 @@ final class HackAuditorManager
     }
 
     /**
-     * Return the security score from the latest scan, or 0 if no scans exist.
+     * Return the security score from the latest saved scan, or 0 if none exist.
      */
     public function score(): int
     {
-        /** @var ScanResult|null $latest */
-        $latest = ScanResult::query()->latest()->first();
+        $history = new ScanHistory;
+        $latest = $history->latest();
 
-        return $latest?->score ?? 0;
+        return (int) ($latest['overall_score'] ?? 0);
+    }
+
+    /**
+     * Get the scan history instance.
+     */
+    public function history(): ScanHistory
+    {
+        return new ScanHistory;
     }
 }

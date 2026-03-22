@@ -5,12 +5,12 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
-use Illuminate\Database\QueryException;
-use Mahdi\HackAuditor\CTF\CTFGenerator;
-use Mahdi\HackAuditor\Models\ScanResult;
-use Mahdi\HackAuditor\Support\VulnerabilityType;
 
 use function Laravel\Prompts\spin;
+
+use Mahdi\HackAuditor\CTF\CTFGenerator;
+use Mahdi\HackAuditor\Support\ScanHistory;
+use Mahdi\HackAuditor\Support\VulnerabilityType;
 
 final class HackCTFCommand extends Command
 {
@@ -73,16 +73,8 @@ final class HackCTFCommand extends Command
      */
     private function handleFromScan(): int
     {
-        try {
-            /** @var ScanResult|null $latestScan */
-            $latestScan = ScanResult::query()
-                ->latest()
-                ->first();
-        } catch (QueryException) {
-            $this->components->error('No scan results found. Run `php artisan hack:scan --save` first.');
-
-            return self::FAILURE;
-        }
+        $history = new ScanHistory;
+        $latestScan = $history->latest();
 
         if ($latestScan === null) {
             $this->components->error('No scan results found. Run `php artisan hack:scan --save` first.');
@@ -90,15 +82,19 @@ final class HackCTFCommand extends Command
             return self::FAILURE;
         }
 
+        $createdAt = $latestScan['created_at'] ?? 'Unknown';
+        $score = (int) ($latestScan['overall_score'] ?? 0);
+        $totalVulns = (int) ($latestScan['counts']['total'] ?? count($latestScan['vulnerabilities'] ?? []));
+
         $this->components->info(
-            "Loading scan from <options=bold>{$latestScan->created_at->format('Y-m-d H:i')}</>"
-            ." — Score: <options=bold>{$latestScan->score}/100</>"
-            ." — <options=bold>{$latestScan->total_vulnerabilities}</> vulnerabilities",
+            "Loading scan from <options=bold>{$createdAt}</>"
+            ." — Score: <options=bold>{$score}/100</>"
+            ." — <options=bold>{$totalVulns}</> vulnerabilities",
         );
         $this->newLine();
 
         /** @var array<int, array<string, mixed>> $vulnerabilities */
-        $vulnerabilities = is_array($latestScan->vulnerabilities) ? $latestScan->vulnerabilities : [];
+        $vulnerabilities = is_array($latestScan['vulnerabilities'] ?? null) ? $latestScan['vulnerabilities'] : [];
 
         if (count($vulnerabilities) === 0) {
             $this->components->warn('The latest scan had no vulnerabilities. Nothing to generate.');

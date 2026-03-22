@@ -99,6 +99,72 @@ class AIAdapter
     }
 
     /**
+     * Send a prompt and return both the response text and token usage.
+     *
+     * Same retry logic as send(), but also extracts prompt_tokens and
+     * completion_tokens from the AI response's usage object.
+     *
+     * @return array{text: string, usage: array{prompt_tokens: int, completion_tokens: int}}
+     *
+     * @throws RuntimeException When all retry attempts are exhausted.
+     */
+    public function sendWithUsage(string $systemPrompt, string $userPrompt): array
+    {
+        $lastException = null;
+
+        for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
+            try {
+                $this->logRequest($systemPrompt, $userPrompt, $attempt);
+
+                $agent = new AnonymousAgent(
+                    instructions: $systemPrompt,
+                    messages: [],
+                    tools: [],
+                );
+
+                $response = $agent->prompt(
+                    prompt: $userPrompt,
+                    provider: $this->provider,
+                    model: $this->model,
+                    timeout: $this->timeout,
+                );
+
+                $text = $response->text;
+                $this->logResponse($text, $attempt);
+
+                $promptTokens = 0;
+                $completionTokens = 0;
+
+                if (isset($response->usage)) {
+                    $promptTokens = $response->usage->promptTokens ?? 0;
+                    $completionTokens = $response->usage->completionTokens ?? 0;
+                }
+
+                return [
+                    'text' => $text,
+                    'usage' => [
+                        'prompt_tokens' => $promptTokens,
+                        'completion_tokens' => $completionTokens,
+                    ],
+                ];
+            } catch (\Throwable $e) {
+                $lastException = $e;
+                $this->logRetry($attempt, $e);
+
+                if ($attempt < self::MAX_RETRIES) {
+                    $delaySeconds = (int) pow(2, $attempt - 1);
+                    sleep($delaySeconds);
+                }
+            }
+        }
+
+        throw new RuntimeException(
+            'AI request failed after '.self::MAX_RETRIES." attempts: {$lastException?->getMessage()}",
+            previous: $lastException,
+        );
+    }
+
+    /**
      * Execute the AI request using the laravel/ai SDK.
      *
      * Uses AnonymousAgent with the Promptable trait to send the system prompt
