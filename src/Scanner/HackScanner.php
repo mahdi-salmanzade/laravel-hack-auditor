@@ -9,7 +9,6 @@ use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Contracts\ScannerInterface;
-use Mahdi\HackAuditor\Exceptions\InvalidAIResponseException;
 use Mahdi\HackAuditor\Support\UsageTracker;
 use SplFileInfo;
 
@@ -111,8 +110,8 @@ final class HackScanner implements ScannerInterface
 
         try {
             $report = $this->analyzeFiles([$extracted]);
-        } catch (InvalidAIResponseException $e) {
-            Log::warning('[HackAuditor] Failed to parse AI response for file scan', [
+        } catch (\Throwable $e) {
+            Log::warning('[HackAuditor] AI scan failed for file', [
                 'path' => $path,
                 'error' => $e->getMessage(),
             ]);
@@ -120,7 +119,7 @@ final class HackScanner implements ScannerInterface
             $report = new VulnerabilityReport(
                 vulnerabilities: [],
                 overallScore: 0,
-                summary: "AI response could not be parsed for {$path}. Re-run the scan to retry.",
+                summary: "AI scan failed for {$path}: {$e->getMessage()}. Re-run the scan to retry.",
                 ctfIdea: '',
             );
         }
@@ -145,15 +144,15 @@ final class HackScanner implements ScannerInterface
 
         try {
             $report = $this->analyzeFiles([$fileData]);
-        } catch (InvalidAIResponseException $e) {
-            Log::warning('[HackAuditor] Failed to parse AI response for inline code scan', [
+        } catch (\Throwable $e) {
+            Log::warning('[HackAuditor] AI scan failed for inline code', [
                 'error' => $e->getMessage(),
             ]);
 
             $report = new VulnerabilityReport(
                 vulnerabilities: [],
                 overallScore: 0,
-                summary: 'AI response could not be parsed. Re-run the scan to retry.',
+                summary: "AI scan failed: {$e->getMessage()}. Re-run the scan to retry.",
                 ctfIdea: '',
             );
         }
@@ -188,10 +187,10 @@ final class HackScanner implements ScannerInterface
 
             try {
                 $reports[] = $this->analyzeFiles($chunk);
-            } catch (InvalidAIResponseException $e) {
+            } catch (\Throwable $e) {
                 $this->chunksFailedParse++;
 
-                Log::warning('[HackAuditor] Skipping chunk due to unparseable AI response', [
+                Log::warning('[HackAuditor] Skipping chunk due to AI failure', [
                     'files' => array_map(fn (array $f): string => $f['path'], $chunk),
                     'error' => $e->getMessage(),
                 ]);

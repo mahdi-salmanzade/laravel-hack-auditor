@@ -20,7 +20,7 @@ class AIAdapter
 
     private readonly int $timeout;
 
-    private const int MAX_RETRIES = 3;
+    private const int MAX_RETRIES = 5;
 
     /**
      * Create a new AIAdapter instance, reading configuration from hack-auditor config.
@@ -76,7 +76,7 @@ class AIAdapter
                 $this->logRetry($attempt, $e);
 
                 if ($attempt < self::MAX_RETRIES) {
-                    $delaySeconds = (int) pow(2, $attempt - 1);
+                    $delaySeconds = $this->calculateBackoff($attempt, $e);
                     sleep($delaySeconds);
                 }
             }
@@ -152,7 +152,7 @@ class AIAdapter
                 $this->logRetry($attempt, $e);
 
                 if ($attempt < self::MAX_RETRIES) {
-                    $delaySeconds = (int) pow(2, $attempt - 1);
+                    $delaySeconds = $this->calculateBackoff($attempt, $e);
                     sleep($delaySeconds);
                 }
             }
@@ -226,6 +226,29 @@ class AIAdapter
     }
 
     /**
+     * Calculate backoff delay based on attempt number and error type.
+     *
+     * Rate limit errors get much longer delays (15s, 30s, 60s, 120s)
+     * to respect the provider's limits. Other errors use standard
+     * exponential backoff (2s, 4s, 8s, 16s).
+     */
+    private function calculateBackoff(int $attempt, \Throwable $exception): int
+    {
+        $message = strtolower($exception->getMessage());
+
+        $isRateLimit = str_contains($message, 'rate limit')
+            || str_contains($message, 'rate_limit')
+            || str_contains($message, 'too many requests')
+            || str_contains($message, '429');
+
+        if ($isRateLimit) {
+            return min(120, 15 * (int) pow(2, $attempt - 1));
+        }
+
+        return (int) pow(2, $attempt);
+    }
+
+    /**
      * Log a retry attempt when a request fails.
      */
     private function logRetry(int $attempt, \Throwable $exception): void
@@ -239,7 +262,7 @@ class AIAdapter
             return;
         }
 
-        $delaySeconds = (int) pow(2, $attempt - 1);
+        $delaySeconds = $this->calculateBackoff($attempt, $exception);
 
         Log::warning('[HackAuditor] AI request failed, retrying', [
             'attempt' => $attempt,
