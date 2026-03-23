@@ -113,3 +113,63 @@ it('returns empty vulnerabilities when all findings are self-contradicting', fun
 
     expect($report->vulnerabilities)->toHaveCount(0);
 });
+
+it('filters strong dismissals from production false positives', function (string $description): void {
+    $parser = new ResponseParser;
+
+    $json = json_encode([
+        'vulnerabilities' => [
+            [
+                'type' => 'Idor',
+                'location' => 'app/Http/Controllers/TestController.php',
+                'line' => 10,
+                'severity' => 'Medium',
+                'description' => $description,
+                'proof' => 'code',
+                'fix' => 'fix',
+            ],
+        ],
+        'overall_score' => 90,
+        'summary' => 'Test.',
+        'ctf_idea' => '',
+    ]);
+
+    $report = $parser->parse($json);
+
+    expect($report->vulnerabilities)->toHaveCount(0);
+})->with([
+    'no actual vulnerability on re-analysis' => 'No actual vulnerability here on re-analysis.',
+    'by design for owner access' => 'this is by design for owner access',
+    'actually safe with self-check' => 'this is actually safe. Removing this finding after self-check.',
+    'intentional for owner' => "While WebhookTrigger has 'secret' in \$hidden, the code explicitly constructs the webhook_url using \$webhook->secret, effectively exposing the secret in the URL. This is intentional for the owner to see their webhook URL.",
+    'actually safe via whereHas' => 'However, since the base query already has the membership constraint via whereHas, this is actually safe.',
+    'on re-analysis by design' => 'On re-analysis, this is by design for owner access.',
+]);
+
+it('keeps findings where partial mitigation is acknowledged but code is still vulnerable', function (string $description): void {
+    $parser = new ResponseParser;
+
+    $json = json_encode([
+        'vulnerabilities' => [
+            [
+                'type' => 'SqlInjection',
+                'location' => 'app/Http/Controllers/ReportController.php',
+                'line' => 42,
+                'severity' => 'High',
+                'description' => $description,
+                'proof' => 'DB::select("SELECT ... " . $column)',
+                'fix' => 'Use parameterized queries',
+            ],
+        ],
+        'overall_score' => 40,
+        'summary' => 'SQL injection risk found.',
+        'ctf_idea' => '',
+    ]);
+
+    $report = $parser->parse($json);
+
+    expect($report->vulnerabilities)->toHaveCount(1);
+})->with([
+    'cast mitigates but architecture is risky' => 'The values are cast to int in getDateInterval, which mitigates direct exploitation, but the architecture of building raw SQL via string concatenation is a SQL injection risk',
+    'cast prevents but fragile defense' => 'although the (int) cast currently prevents injection, this is a fragile defense-in-depth failure',
+]);

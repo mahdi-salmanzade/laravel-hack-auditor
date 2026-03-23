@@ -435,21 +435,39 @@ final class HackScanner implements ScannerInterface
      * $hidden, $guarded, $casts) so the AI can verify mass assignment and
      * sensitive data exposure findings against actual model configuration.
      *
+     * Falls back to ContextCollector's regex-based parsing when RuntimeIntrospector
+     * cannot instantiate a model (e.g., constructor dependencies, missing DB).
+     *
+     * Processes ALL file types (controllers, models, routes, services) to ensure
+     * model context is available regardless of which file references the model.
+     *
      * @param  array<int, array{path: string, content: string, type: string}>  $files
      */
     private function injectModelContext(array $files): void
     {
-        if ($this->runtimeIntrospector === null) {
+        if ($this->runtimeIntrospector === null && $this->contextCollector === null) {
             return;
         }
 
         $modelContext = [];
 
         foreach ($files as $file) {
-            if ($file['type'] !== 'controller') {
+            // For model files, extract the FQCN from the file itself
+            if ($file['type'] === 'model') {
+                $fqcn = $this->extractClassName($file['content']);
+
+                if ($fqcn !== null && ! isset($modelContext[$fqcn])) {
+                    $info = $this->resolveModelInfo($fqcn, $file['content']);
+
+                    if ($info !== null) {
+                        $modelContext[$fqcn] = $info;
+                    }
+                }
+
                 continue;
             }
 
+            // For all other file types, extract model references from use statements
             $modelClasses = $this->extractModelReferences($file['content']);
 
             foreach ($modelClasses as $modelClass) {
@@ -457,14 +475,10 @@ final class HackScanner implements ScannerInterface
                     continue;
                 }
 
-                try {
-                    $info = $this->runtimeIntrospector->getModelInfo($modelClass);
+                $info = $this->resolveModelInfo($modelClass);
 
-                    if ($info !== null) {
-                        $modelContext[$modelClass] = $info;
-                    }
-                } catch (\Throwable) {
-                    // Model introspection is best-effort
+                if ($info !== null) {
+                    $modelContext[$modelClass] = $info;
                 }
             }
         }
@@ -472,6 +486,152 @@ final class HackScanner implements ScannerInterface
         if ($modelContext !== []) {
             $this->promptBuilder->withModelContext($modelContext);
         }
+    }
+
+    /**
+     * Resolve model metadata using RuntimeIntrospector with regex fallback.
+     *
+     * First attempts RuntimeIntrospector (authoritative, reads actual class properties).
+     * If that returns null (class not found, instantiation failure, DB dependency),
+     * falls back to regex-based parsing of the model source file.
+     *
+     * @param  string  $modelClass  The FQCN of the model
+     * @param  string|null  $sourceContent  Optional pre-read source content (for model files already in the batch)
+     * @return array{fillable: array<int, string>, hidden: array<int, string>, guarded: array<int, string>, casts: array<string, string>}|null
+     */
+    private function resolveModelInfo(string $modelClass, ?string $sourceContent = null): ?array
+    {
+        // Try RuntimeIntrospector first (authoritative)
+        if ($this->runtimeIntrospector !== null) {
+            try {
+                $info = $this->runtimeIntrospector->getModelInfo($modelClass);
+
+                if ($info !== null) {
+                    return $info;
+                }
+            } catch (\Throwable) {
+                // Fall through to regex fallback
+            }
+        }
+
+        // Fallback: read model source and parse with regex
+        if ($sourceContent === null) {
+            $filePath = $this->resolveClassPath($modelClass);
+
+            if ($filePath === null || ! file_exists($filePath)) {
+                Log::debug('[HackAuditor] Could not resolve model info for {model} — runtime introspection failed and source file not found', [
+                    'model' => $modelClass,
+                ]);
+
+                return null;
+            }
+
+            $sourceContent = (string) file_get_contents($filePath);
+        }
+
+        $fillable = $this->parsePropertyArray($sourceContent, 'fillable');
+        $hidden = $this->parsePropertyArray($sourceContent, 'hidden');
+        $guarded = $this->parsePropertyArray($sourceContent, 'guarded');
+        $casts = $this->parsePropertyAssocArray($sourceContent, 'casts');
+
+        // If all arrays are empty, the regex likely couldn't parse anything useful
+        if ($fillable === [] && $hidden === [] && $guarded === [] && $casts === []) {
+            Log::debug('[HackAuditor] Regex fallback found no model properties for {model}', [
+                'model' => $modelClass,
+            ]);
+
+            return null;
+        }
+
+        return [
+            'fillable' => $fillable,
+            'hidden' => $hidden,
+            'guarded' => $guarded,
+            'casts' => $casts,
+        ];
+    }
+
+    /**
+     * Parse a simple PHP array property from source code using regex.
+     *
+     * Handles both single-line and multi-line array definitions with bracket
+     * nesting awareness. Returns string values found in the array.
+     *
+     * @return array<int, string>
+     */
+    private function parsePropertyArray(string $content, string $propertyName): array
+    {
+        $escaped = preg_quote($propertyName, '/');
+
+        // Match the property assignment, handling nested brackets
+        if (! preg_match('/\$'.$escaped.'\s*=\s*\[/s', $content, $match, PREG_OFFSET_CAPTURE)) {
+            return [];
+        }
+
+        $startOffset = $match[0][1] + strlen($match[0][0]);
+        $depth = 1;
+        $length = strlen($content);
+        $pos = $startOffset;
+
+        // Walk forward tracking bracket depth to find the matching close bracket
+        while ($pos < $length && $depth > 0) {
+            if ($content[$pos] === '[') {
+                $depth++;
+            } elseif ($content[$pos] === ']') {
+                $depth--;
+            }
+            $pos++;
+        }
+
+        $arrayContent = substr($content, $startOffset, $pos - $startOffset - 1);
+
+        $values = [];
+
+        if (preg_match_all("/['\"]([^'\"]+)['\"]/", $arrayContent, $valueMatches)) {
+            $values = $valueMatches[1];
+        }
+
+        return $values;
+    }
+
+    /**
+     * Parse a PHP associative array property from source code using regex.
+     *
+     * @return array<string, string>
+     */
+    private function parsePropertyAssocArray(string $content, string $propertyName): array
+    {
+        $escaped = preg_quote($propertyName, '/');
+
+        if (! preg_match('/\$'.$escaped.'\s*=\s*\[/s', $content, $match, PREG_OFFSET_CAPTURE)) {
+            return [];
+        }
+
+        $startOffset = $match[0][1] + strlen($match[0][0]);
+        $depth = 1;
+        $length = strlen($content);
+        $pos = $startOffset;
+
+        while ($pos < $length && $depth > 0) {
+            if ($content[$pos] === '[') {
+                $depth++;
+            } elseif ($content[$pos] === ']') {
+                $depth--;
+            }
+            $pos++;
+        }
+
+        $arrayContent = substr($content, $startOffset, $pos - $startOffset - 1);
+
+        $values = [];
+
+        if (preg_match_all("/['\"]([^'\"]+)['\"]\s*=>\s*['\"]?([^'\",\]\s]+)['\"]?/", $arrayContent, $valueMatches, PREG_SET_ORDER)) {
+            foreach ($valueMatches as $valueMatch) {
+                $values[$valueMatch[1]] = rtrim($valueMatch[2], ',');
+            }
+        }
+
+        return $values;
     }
 
     /**
@@ -522,7 +682,7 @@ final class HackScanner implements ScannerInterface
 
         if (preg_match_all('/function\s+\w+\s*\(([^)]*)\)/s', $content, $matches)) {
             foreach ($matches[1] as $params) {
-                if (preg_match_all('/(\w+)\s+\$\w+/', $params, $paramMatches)) {
+                if (preg_match_all('/\??(\w+)\s+\$\w+/', $params, $paramMatches)) {
                     foreach ($paramMatches[1] as $typeHint) {
                         if (isset($uses[$typeHint]) && str_contains($uses[$typeHint], 'Requests\\')) {
                             $formRequests[] = $uses[$typeHint];

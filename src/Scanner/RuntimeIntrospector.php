@@ -68,11 +68,7 @@ final class RuntimeIntrospector
                 continue;
             }
 
-            $methodName = $this->extractMethodName($action);
-
-            if ($methodName === null) {
-                continue;
-            }
+            $methodName = $this->extractMethodName($action) ?? '__invoke';
 
             $httpMethods = array_filter($route->methods(), fn (string $m): bool => $m !== 'HEAD');
             $httpMethod = implode('|', $httpMethods);

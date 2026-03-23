@@ -701,3 +701,275 @@ PHP);
         ->and($result->rateLimiters)->not->toBeEmpty()
         ->and($result->rateLimiters)->toHaveKey('api');
 });
+
+it('detects invokable controller routes', function (): void {
+    $routesDir = $this->tempDir.'/routes';
+    mkdir($routesDir, 0755, true);
+
+    file_put_contents($routesDir.'/web.php', <<<'PHP'
+<?php
+
+use App\Http\Controllers\HomeController;
+
+Route::get('/', HomeController::class)->middleware('auth');
+PHP);
+
+    $this->app->setBasePath($this->tempDir);
+    config()->set('hack-auditor.context.enabled', true);
+    config()->set('hack-auditor.context.include_routes', true);
+
+    $controllerContent = <<<'PHP'
+<?php
+
+namespace App\Http\Controllers;
+
+class HomeController extends Controller
+{
+    public function __invoke()
+    {
+        return view('home');
+    }
+}
+PHP;
+
+    $files = [
+        [
+            'path' => 'app/Http/Controllers/HomeController.php',
+            'content' => $controllerContent,
+            'type' => 'controller',
+        ],
+    ];
+
+    $collector = new ContextCollector;
+    $result = $collector->collect($files);
+
+    expect($result)->toBeInstanceOf(AppContext::class)
+        ->and($result->routes)->toHaveKey('App\Http\Controllers\HomeController@__invoke');
+
+    $route = $result->routes['App\Http\Controllers\HomeController@__invoke'];
+
+    expect($route['method'])->toBe('GET')
+        ->and($route['uri'])->toBe('/')
+        ->and($route['middleware'])->toContain('auth');
+});
+
+it('extracts middleware from Route::prefix()->middleware()->group() chains', function (): void {
+    $routesDir = $this->tempDir.'/routes';
+    mkdir($routesDir, 0755, true);
+
+    file_put_contents($routesDir.'/api.php', <<<'PHP'
+<?php
+
+use App\Http\Controllers\AdminController;
+
+Route::prefix('admin')->middleware('auth:sanctum')->group(function () {
+    Route::get('/dashboard', [AdminController::class, 'dashboard']);
+    Route::post('/settings', [AdminController::class, 'updateSettings']);
+});
+PHP);
+
+    $this->app->setBasePath($this->tempDir);
+    config()->set('hack-auditor.context.enabled', true);
+    config()->set('hack-auditor.context.include_routes', true);
+
+    $controllerContent = <<<'PHP'
+<?php
+
+namespace App\Http\Controllers;
+
+class AdminController extends Controller
+{
+    public function dashboard()
+    {
+        return view('admin.dashboard');
+    }
+
+    public function updateSettings()
+    {
+        return response()->json(['ok' => true]);
+    }
+}
+PHP;
+
+    $files = [
+        [
+            'path' => 'app/Http/Controllers/AdminController.php',
+            'content' => $controllerContent,
+            'type' => 'controller',
+        ],
+    ];
+
+    $collector = new ContextCollector;
+    $result = $collector->collect($files);
+
+    expect($result->routes)->not->toBeEmpty();
+
+    $dashboardRoute = $result->routes['App\Http\Controllers\AdminController@dashboard'] ?? null;
+
+    expect($dashboardRoute)->not->toBeNull()
+        ->and($dashboardRoute['middleware'])->toContain('auth:sanctum')
+        ->and($dashboardRoute['uri'])->toBe('/admin/dashboard');
+
+    $settingsRoute = $result->routes['App\Http\Controllers\AdminController@updateSettings'] ?? null;
+
+    expect($settingsRoute)->not->toBeNull()
+        ->and($settingsRoute['method'])->toBe('POST')
+        ->and($settingsRoute['uri'])->toBe('/admin/settings');
+});
+
+it('applies prefix to resource route URIs', function (): void {
+    $routesDir = $this->tempDir.'/routes';
+    mkdir($routesDir, 0755, true);
+
+    file_put_contents($routesDir.'/api.php', <<<'PHP'
+<?php
+
+use App\Http\Controllers\PostController;
+
+Route::prefix('api/v1')->middleware('auth')->group(function () {
+    Route::apiResource('posts', PostController::class);
+});
+PHP);
+
+    $this->app->setBasePath($this->tempDir);
+    config()->set('hack-auditor.context.enabled', true);
+    config()->set('hack-auditor.context.include_routes', true);
+
+    $controllerContent = <<<'PHP'
+<?php
+
+namespace App\Http\Controllers;
+
+class PostController extends Controller
+{
+    public function index() {}
+    public function store() {}
+    public function show() {}
+    public function update() {}
+    public function destroy() {}
+}
+PHP;
+
+    $files = [
+        [
+            'path' => 'app/Http/Controllers/PostController.php',
+            'content' => $controllerContent,
+            'type' => 'controller',
+        ],
+    ];
+
+    $collector = new ContextCollector;
+    $result = $collector->collect($files);
+
+    $indexRoute = $result->routes['App\Http\Controllers\PostController@index'] ?? null;
+
+    expect($indexRoute)->not->toBeNull()
+        ->and($indexRoute['uri'])->toBe('/api/v1/posts')
+        ->and($indexRoute['middleware'])->toContain('auth');
+});
+
+it('scans route files in subdirectories', function (): void {
+    $routesDir = $this->tempDir.'/routes/api';
+    mkdir($routesDir, 0755, true);
+
+    file_put_contents($routesDir.'/v2.php', <<<'PHP'
+<?php
+
+use App\Http\Controllers\ItemController;
+
+Route::get('/items', [ItemController::class, 'index']);
+PHP);
+
+    $this->app->setBasePath($this->tempDir);
+    config()->set('hack-auditor.context.enabled', true);
+    config()->set('hack-auditor.context.include_routes', true);
+
+    $controllerContent = <<<'PHP'
+<?php
+
+namespace App\Http\Controllers;
+
+class ItemController extends Controller
+{
+    public function index()
+    {
+        return [];
+    }
+}
+PHP;
+
+    $files = [
+        [
+            'path' => 'app/Http/Controllers/ItemController.php',
+            'content' => $controllerContent,
+            'type' => 'controller',
+        ],
+    ];
+
+    $collector = new ContextCollector;
+    $result = $collector->collect($files);
+
+    expect($result->routes)->toHaveKey('App\Http\Controllers\ItemController@index');
+});
+
+it('handles Route::group with prefix array key', function (): void {
+    $routesDir = $this->tempDir.'/routes';
+    mkdir($routesDir, 0755, true);
+
+    file_put_contents($routesDir.'/web.php', <<<'PHP'
+<?php
+
+use App\Http\Controllers\ReportController;
+
+Route::group(['prefix' => 'reports', 'middleware' => 'auth'], function () {
+    Route::get('/daily', [ReportController::class, 'daily']);
+});
+PHP);
+
+    $this->app->setBasePath($this->tempDir);
+    config()->set('hack-auditor.context.enabled', true);
+    config()->set('hack-auditor.context.include_routes', true);
+
+    $controllerContent = <<<'PHP'
+<?php
+
+namespace App\Http\Controllers;
+
+class ReportController extends Controller
+{
+    public function daily()
+    {
+        return [];
+    }
+}
+PHP;
+
+    $files = [
+        [
+            'path' => 'app/Http/Controllers/ReportController.php',
+            'content' => $controllerContent,
+            'type' => 'controller',
+        ],
+    ];
+
+    $collector = new ContextCollector;
+    $result = $collector->collect($files);
+
+    $route = $result->routes['App\Http\Controllers\ReportController@daily'] ?? null;
+
+    expect($route)->not->toBeNull()
+        ->and($route['uri'])->toBe('/reports/daily')
+        ->and($route['middleware'])->toContain('auth');
+});
+
+it('returns empty middleware when neither Kernel nor bootstrap/app.php exists', function (): void {
+    $this->app->setBasePath($this->tempDir);
+    config()->set('hack-auditor.context.enabled', true);
+    config()->set('hack-auditor.context.include_middleware', true);
+
+    $collector = new ContextCollector;
+    $result = $collector->collect([]);
+
+    expect($result->middlewareDefinitions)->toBeEmpty()
+        ->and($result->globalMiddleware)->toBeEmpty();
+});

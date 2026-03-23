@@ -9,13 +9,8 @@ use Illuminate\Support\Facades\Log;
 
 use function Laravel\Prompts\spin;
 
-use Mahdi\HackAuditor\AI\AIAdapter;
-use Mahdi\HackAuditor\AI\PromptBuilder;
-use Mahdi\HackAuditor\AI\ResponseParser;
-use Mahdi\HackAuditor\Exceptions\InvalidAIResponseException;
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
 use Mahdi\HackAuditor\Scanner\Baseline;
-use Mahdi\HackAuditor\Scanner\CodeExtractor;
 use Mahdi\HackAuditor\Scanner\FileCollector;
 use Mahdi\HackAuditor\Scanner\GitDiffCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
@@ -26,7 +21,6 @@ use Mahdi\HackAuditor\Support\ScanHistory;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\UsageLog;
 use Mahdi\HackAuditor\Support\UsageTracker;
-use SplFileInfo;
 
 final class HackScanCommand extends Command
 {
@@ -41,7 +35,7 @@ final class HackScanCommand extends Command
         {--fix : Auto-generate fixes}
         {--json : Output as JSON}
         {--html : Generate an HTML report}
-        {--save : Save results to database}
+        {--save : Save results to JSON file}
         {--force : Skip confirmation prompt for large scans}
         {--detailed : Show full descriptions in the table instead of truncating}
         {--diff : Only scan files changed in the current git branch}
@@ -146,6 +140,13 @@ final class HackScanCommand extends Command
         $filteredVulnerabilities = $this->filterBySeverity($report->vulnerabilities, $minimumSeverity);
         $filteredVulnerabilities = $this->applyBaseline($filteredVulnerabilities);
 
+        // These run before any early return so --json mode still logs and saves
+        $this->logUsage($report);
+
+        if ($this->option('save')) {
+            $this->saveResults($report, $elapsedMs);
+        }
+
         if ($this->option('json')) {
             return $this->outputJson($report, $filteredVulnerabilities, $elapsedMs);
         }
@@ -180,29 +181,8 @@ final class HackScanCommand extends Command
             $this->updateBaseline($report);
         }
 
-        if ($this->option('save')) {
-            $this->saveResults($report, $elapsedMs);
-        }
-
         if ($this->option('html')) {
             $this->generateHtmlReport($report, $elapsedMs);
-        }
-
-        // Log usage data
-        if (config('hack-auditor.usage.log_enabled', true) && $report->hasUsageData()) {
-            try {
-                $usageLog = new UsageLog;
-                $detectedPricing = AiProviders::detectPricing();
-                $usageLog->record($report->getUsageTracker(), [
-                    'files_skipped' => $report->getFilesSkipped(),
-                    'path' => is_string($this->option('path')) ? $this->option('path') : null,
-                    'score' => $report->overallScore,
-                    'provider' => $detectedPricing['provider'],
-                    'model' => $detectedPricing['model'],
-                ]);
-            } catch (\Throwable) {
-                // Usage logging is best-effort
-            }
         }
 
         $this->displayScanComparison($report);
@@ -536,23 +516,17 @@ final class HackScanCommand extends Command
             );
         }
 
-        /** @var CodeExtractor $extractor */
-        $extractor = app(CodeExtractor::class);
-
-        $splFiles = collect($files)->map(fn (string $path): SplFileInfo => new SplFileInfo($path));
-        $chunks = $extractor->chunk($splFiles);
-
+        // Use scanFile for each changed file so it goes through the full
+        // HackScanner pipeline (route context, routed methods, form requests,
+        // model context) instead of bypassing it with raw PromptBuilder calls.
         $reports = [];
 
-        foreach ($chunks as $chunk) {
+        foreach ($files as $filePath) {
             try {
-                $systemPrompt = app(PromptBuilder::class)->systemPrompt();
-                $userPrompt = app(PromptBuilder::class)->userPrompt($chunk);
-                $response = app(AIAdapter::class)->send($systemPrompt, $userPrompt);
-                $reports[] = app(ResponseParser::class)->parse($response);
-            } catch (InvalidAIResponseException $e) {
-                Log::warning('[HackAuditor] Skipping diff chunk due to unparseable AI response', [
-                    'files' => array_map(fn (array $f): string => $f['path'], $chunk),
+                $reports[] = $scanner->scanFile($filePath);
+            } catch (\Throwable $e) {
+                Log::warning('[HackAuditor] Skipping diff file due to scan failure', [
+                    'file' => $filePath,
                     'error' => $e->getMessage(),
                 ]);
             }
@@ -697,6 +671,30 @@ final class HackScanCommand extends Command
     }
 
     /**
+     * Log usage data to the filesystem usage log.
+     */
+    private function logUsage(VulnerabilityReport $report): void
+    {
+        if (! config('hack-auditor.usage.log_enabled', true) || ! $report->hasUsageData()) {
+            return;
+        }
+
+        try {
+            $usageLog = new UsageLog;
+            $detectedPricing = AiProviders::detectPricing();
+            $usageLog->record($report->getUsageTracker(), [
+                'files_skipped' => $report->getFilesSkipped(),
+                'path' => is_string($this->option('path')) ? $this->option('path') : null,
+                'score' => $report->overallScore,
+                'provider' => $detectedPricing['provider'],
+                'model' => $detectedPricing['model'],
+            ]);
+        } catch (\Throwable) {
+            // Usage logging is best-effort
+        }
+    }
+
+    /**
      * Display token usage summary after scan results.
      */
     private function displayUsageSummary(VulnerabilityReport $report): void
@@ -747,7 +745,7 @@ final class HackScanCommand extends Command
 
             $this->components->twoColumnDetail(
                 '<fg=gray>Model</>',
-                sprintf('%s <fg=gray>(%s)</>',  $modelName, $pricing['provider']),
+                sprintf('%s <fg=gray>(%s)</>', $modelName, $pricing['provider']),
             );
 
             $this->components->twoColumnDetail(

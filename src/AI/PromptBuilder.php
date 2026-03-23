@@ -46,28 +46,50 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    - "Missing authentication" when the route has auth/auth:sanctum/auth:api middleware applied
    - "Missing authorization" when a Policy exists for the model and the controller uses $this->authorize(), Gate::allows(), policy(), can(), or the route has ->can()
    - "Missing validation" when the controller method type-hints a FormRequest class
-   - "Missing rate limiting" when the route has throttle middleware or a named rate limiter
    - "Missing CSRF" on routes in the 'api' middleware group (APIs use token auth, not CSRF)
    - "SQL injection" on Eloquent query builder calls using ? placeholders or parameter binding (e.g., ->where('id', $id), ->whereIn('id', $ids)) — Eloquent parameterizes these automatically
    - "SQL injection" on Eloquent methods: find(), findOrFail(), where() with column/value args, firstWhere(), pluck(), paginate(), etc.
+   - "SQL injection" when values are cast to (int) before interpolation — PHP integer cast is mathematically safe
+   - "SQL injection" when Carbon/DateTime objects are interpolated into SQL — they produce safe date strings
+   - "SQL injection" when implode() is used with config() or hardcoded arrays — trace the source
+   - "SQL injection" for LIKE/ilike wildcard injection (% and _ in search input) — Eloquent parameterizes the value, so % and _ are LIKE metacharacters only, NOT SQL injection. This is a LOW code-smell at most (user can broaden search results), never HIGH or SQL injection
    - "Mass assignment" when $fillable or $guarded is properly defined on the model
    - "IDOR" when route model binding is used with ->scopeBindings() or when a Policy checks ownership
    - "IDOR" when a global scope (e.g., tenant scope) automatically filters queries
+   - "IDOR" when middleware overwrites request parameters with server-controlled values (e.g., $request->merge(['user_id' => $authenticatedId]) in middleware means the controller reads server-set values, NOT user input)
    - "Missing encryption" for fields that use 'encrypted' cast in the model
    - "Data exposure" for fields listed in the model's $hidden array
    - "Sensitive data in logs" for logging that only includes non-sensitive contextual data
    - "Hardcoded credentials" for route names, config keys, or non-secret string constants
    - "No HTTPS enforcement" — this is a server/infrastructure concern
+   - "Missing rate limiting" on general CRUD endpoints — ONLY flag on auth (login/register/password-reset), OTP/verification, and payment endpoints
+   - Vulnerabilities in controller methods that have NO registered routes (dead code / unrouted methods). If the "Routed Methods" section is provided, ONLY analyze methods listed there — all other methods are unreachable and cannot be exploited.
 
 3. LARAVEL SECURITY MODEL:
    - Middleware can be applied at: global level, middleware group level, route group level, individual route level, or controller constructor level. ALL are valid. Check APPLICATION CONTEXT.
+   - MIDDLEWARE CAN OVERWRITE REQUEST DATA: Middleware commonly uses $request->merge() or $request->field = $value to replace user-supplied values with server-derived values (e.g., extracting user ID from JWT and overwriting $request->user_id). When this happens, the controller reads SERVER-CONTROLLED data, not user input. Check middleware code before flagging IDOR.
    - FormRequest classes validate AND authorize. If a method type-hints a FormRequest, validation IS happening.
-   - Eloquent ALWAYS parameterizes queries by default. SQL injection vectors are ONLY: DB::raw(), ->whereRaw(), ->selectRaw(), ->orderByRaw(), ->groupByRaw(), ->havingRaw() with unparameterized user input, or DB::statement()/DB::select() with concatenation.
+   - Eloquent ALWAYS parameterizes queries by default. SQL injection vectors are ONLY: DB::raw(), ->whereRaw(), ->selectRaw(), ->orderByRaw(), ->groupByRaw(), ->havingRaw() with unparameterized user input, or DB::statement()/DB::select() with concatenation of USER input.
    - Route model binding + ScopedBindings means Laravel auto-404s if model doesn't belong to parent.
    - Gate::before() callbacks granting super-admin access is intentional, not a vulnerability.
+   - Carbon objects and DateTime instances interpolated into SQL always produce safe formatted strings — NOT injection vectors.
 
-4. DO FLAG THESE — REAL VULNERABILITIES:
-   - DB::raw() / whereRaw() / selectRaw() with concatenated/unescaped user input
+4. DATA FLOW ANALYSIS — TRACE THE SOURCE BEFORE FLAGGING:
+   SQL injection, command injection, SSRF, and open redirect all require USER-CONTROLLED input.
+   Before flagging, trace the variable back to its source. DO NOT flag if the data comes from:
+   - config() / Config:: values (static PHP files, not user-modifiable at runtime)
+   - Hardcoded arrays, constants, or enums
+   - Helper/service methods that return only hardcoded or config-sourced values
+   - Values validated through in_array(), allowlists, or strict type casting like (int)
+   - Database values that were originally set by admins/server, not user input
+   - Environment variables (server-controlled, not request-controlled)
+   The pattern "implode($array) into raw SQL" is NOT injection when $array comes from
+   config or hardcoded values — it is only injection when $array contains user input.
+   The pattern "(int)$var into raw SQL" is NOT injection — PHP integer cast always produces
+   a safe integer regardless of input. "1 OR 1=1" cast to (int) becomes 1.
+
+5. DO FLAG THESE — REAL VULNERABILITIES:
+   - DB::raw() / whereRaw() / selectRaw() with concatenated/unescaped USER input (trace the source!)
    - Unserialization of user input (unserialize() with user-controlled strings)
    - File operations with user-controlled paths without validation (path traversal)
    - exec(), shell_exec(), system(), passthru(), proc_open() with user input (command injection)
@@ -82,16 +104,17 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    - Broken authentication: custom auth logic bypassing Laravel's auth with exploitable flaws
    - Overly permissive CORS (allowed_origins = ['*'] with credentials)
    - Session fixation: not regenerating session after auth status change
-   - Rate limiting gaps: auth/OTP/password-reset endpoints with NO throttle at any level
+   - Rate limiting gaps: ONLY on login, register, password-reset, OTP/verification, and payment endpoints with NO throttle. Do NOT flag missing rate limiting on general CRUD, dashboard, or internal endpoints — it creates noise
 
-5. SEVERITY CALIBRATION:
-   - CRITICAL: Directly exploitable for account takeover, RCE, or full data breach
-   - HIGH: Exploitable vulnerability requiring some conditions but significant impact
+6. SEVERITY CALIBRATION:
+   - CRITICAL: Directly exploitable RIGHT NOW for account takeover, RCE, or full data breach with no additional access required
+   - HIGH: Exploitable vulnerability requiring some conditions but leading to significant impact
    - MEDIUM: Real security weakness requiring specific circumstances or limited impact
    - LOW: Security best practice violation, defense-in-depth gap, minimal direct impact
-   - DO NOT inflate severity.
+   - DO NOT inflate severity. If you find yourself writing "if X changes in the future" or "if the logic is ever modified" — that is LOW at most, not HIGH. Flag what IS exploitable now, not hypothetical future risks.
+   - Code patterns that are ugly but safe (e.g., string concat with (int) cast, config values in raw SQL) should be LOW code-smell suggestions at most. If you cannot construct a concrete exploit, it is not HIGH.
 
-6. FALSE POSITIVE PREVENTION — BEFORE EACH FINDING ASK:
+7. FALSE POSITIVE PREVENTION — BEFORE EACH FINDING ASK:
    □ Did I check if middleware handles this at the route level?
    □ Did I check if a FormRequest handles validation/authorization?
    □ Did I check if a Policy exists for this model?
@@ -99,6 +122,7 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    □ Did I check if a global scope restricts queries?
    □ Did I check if route model binding handles the lookup?
    □ Did I check if the base controller applies relevant middleware?
+   □ Did I TRACE the data source? Is it user input or config/hardcoded/server-controlled?
    □ Would a senior Laravel developer agree this is a real vulnerability?
    If any check eliminates the finding, DO NOT REPORT IT.
 
@@ -209,56 +233,14 @@ PROMPT;
             $prompt = "Analyze the following Laravel application files for security vulnerabilities:\n\n";
         }
 
-        if ($this->routeContext !== []) {
-            $prompt .= "## Route Middleware Context\nThe following middleware is applied to this controller's routes:\n";
+        $chunkContext = $this->buildChunkContext($hasAppContext);
 
-            foreach ($this->routeContext as $route => $middleware) {
-                $middlewareList = implode(', ', $middleware);
-                $prompt .= "- {$route} → {$middlewareList}\n";
+        if ($chunkContext !== '') {
+            if ($hasAppContext) {
+                $prompt .= "=== CHUNK-SPECIFIC CONTEXT (authoritative for the files below, overrides APPLICATION CONTEXT where they overlap) ===\n";
             }
 
-            $prompt .= "\n";
-            $this->routeContext = [];
-        }
-
-        if ($this->routedMethods !== []) {
-            $prompt .= "## Routed Methods\nOnly the following controller methods have registered routes and are reachable:\n";
-
-            foreach ($this->routedMethods as $method => $route) {
-                $prompt .= "- {$method}() → {$route}\n";
-            }
-
-            $prompt .= "\nMethods NOT listed here have NO registered routes and CANNOT be reached by attackers. Do NOT flag them.\n\n";
-            $this->routedMethods = [];
-        }
-
-        if ($this->formRequestContext !== []) {
-            $prompt .= "## FormRequest Context\nThe following FormRequest classes are used by the controller methods being analyzed. Check their authorize() method before flagging IDOR, and check their rules() method before flagging Missing Validation:\n\n";
-
-            foreach ($this->formRequestContext as $formRequest) {
-                $prompt .= "### File: {$formRequest['path']}\n```php\n{$formRequest['content']}\n```\n\n";
-            }
-
-            $this->formRequestContext = [];
-        }
-
-        if ($this->modelContext !== []) {
-            $prompt .= "## Eloquent Model Context\nThe following model metadata is authoritative (read from the actual Model classes at runtime). Use this to verify mass assignment, sensitive data exposure, and other model-related findings:\n";
-
-            foreach ($this->modelContext as $modelClass => $info) {
-                $prompt .= "\n### {$modelClass}\n";
-                $prompt .= '- $fillable: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['fillable']))."]\n";
-                $prompt .= '- $hidden: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['hidden']))."]\n";
-                $prompt .= '- $guarded: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['guarded']))."]\n";
-
-                if ($info['casts'] !== []) {
-                    $castPairs = array_map(fn (string $k, string $v): string => "'{$k}' => '{$v}'", array_keys($info['casts']), array_values($info['casts']));
-                    $prompt .= '- $casts: ['.implode(', ', $castPairs)."]\n";
-                }
-            }
-
-            $prompt .= "\nDo NOT flag mass assignment if \$fillable is properly scoped. Do NOT flag sensitive data exposure for fields in \$hidden.\n\n";
-            $this->modelContext = [];
+            $prompt .= $chunkContext;
         }
 
         if ($hasAppContext) {
@@ -272,6 +254,79 @@ PROMPT;
         $prompt .= 'Respond with ONLY the JSON object. No markdown fences, no explanation, no text before or after.';
 
         return $prompt;
+    }
+
+    /**
+     * Build the chunk-specific context sections and reset consumed state.
+     *
+     * Returns the combined string for route middleware, routed methods,
+     * form request, and model context sections. Resets each context to
+     * empty after consumption so the next call starts fresh.
+     */
+    private function buildChunkContext(bool $hasAppContext): string
+    {
+        $sections = [];
+
+        if ($this->routeContext !== []) {
+            $section = "## Route Middleware Context\nThe following middleware is applied to this controller's routes:\n";
+
+            foreach ($this->routeContext as $route => $middleware) {
+                $middlewareList = implode(', ', $middleware);
+                $section .= "- {$route} → {$middlewareList}\n";
+            }
+
+            $sections[] = $section;
+            $this->routeContext = [];
+        }
+
+        if ($this->routedMethods !== []) {
+            $section = "## Routed Methods\nOnly the following controller methods have registered routes and are reachable:\n";
+
+            foreach ($this->routedMethods as $method => $route) {
+                $section .= "- {$method}() → {$route}\n";
+            }
+
+            $section .= "\nMethods NOT listed here have NO registered routes and CANNOT be reached by attackers. Do NOT flag them.\n";
+            $sections[] = $section;
+            $this->routedMethods = [];
+        }
+
+        if ($this->formRequestContext !== []) {
+            $section = "## FormRequest Context\nThe following FormRequest classes are used by the controller methods being analyzed. Check their authorize() method before flagging IDOR, and check their rules() method before flagging Missing Validation:\n\n";
+
+            foreach ($this->formRequestContext as $formRequest) {
+                $section .= "### File: {$formRequest['path']}\n```php\n{$formRequest['content']}\n```\n\n";
+            }
+
+            $sections[] = $section;
+            $this->formRequestContext = [];
+        }
+
+        if ($this->modelContext !== []) {
+            $section = "## Eloquent Model Context\nThe following model metadata is authoritative (read from the actual Model classes at runtime). Use this to verify mass assignment, sensitive data exposure, and other model-related findings:\n";
+
+            foreach ($this->modelContext as $modelClass => $info) {
+                $section .= "\n### {$modelClass}\n";
+                $section .= '- $fillable: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['fillable']))."]\n";
+                $section .= '- $hidden: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['hidden']))."]\n";
+                $section .= '- $guarded: ['.implode(', ', array_map(fn (string $f): string => "'{$f}'", $info['guarded']))."]\n";
+
+                if ($info['casts'] !== []) {
+                    $castPairs = array_map(fn (string $k, string $v): string => "'{$k}' => '{$v}'", array_keys($info['casts']), array_values($info['casts']));
+                    $section .= '- $casts: ['.implode(', ', $castPairs)."]\n";
+                }
+            }
+
+            $section .= "\nDo NOT flag mass assignment if \$fillable is properly scoped. Do NOT flag sensitive data exposure for fields in \$hidden.\n";
+            $sections[] = $section;
+            $this->modelContext = [];
+        }
+
+        if ($sections === []) {
+            return '';
+        }
+
+        return implode("\n", $sections)."\n";
     }
 
     /**

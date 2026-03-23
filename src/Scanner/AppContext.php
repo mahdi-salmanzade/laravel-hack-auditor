@@ -184,8 +184,9 @@ final readonly class AppContext
      *
      * Removes sections in priority order (least important first):
      * configContext, environment, baseControllerMiddleware, rateLimiters,
-     * models, formRequests, policies, middlewareDefinitions, routes.
-     * Routes are kept last as they are the most important.
+     * formRequests, policies, models, middlewareDefinitions, routes.
+     * Models are kept late because $hidden/$fillable/$guarded prevent
+     * false positives. Routes are kept last as the most important.
      */
     public function truncateToTokenBudget(int $maxTokens): self
     {
@@ -198,9 +199,9 @@ final readonly class AppContext
             'environment',
             'baseControllerMiddleware',
             'rateLimiters',
-            'models',
             'formRequests',
             'policies',
+            'models',
             'middlewareDefinitions',
             'routes',
         ];

@@ -428,10 +428,20 @@ final class ResponseParser
 
     /**
      * Check if a vulnerability description contradicts its own finding.
+     *
+     * Uses a two-pass approach: first checks for strong dismissal patterns that
+     * always indicate a self-contradiction, then checks for weaker mitigation
+     * patterns that can be overridden by adversative "but still vulnerable"
+     * counter-phrases (rescue patterns).
      */
     private function isSelfContradicting(string $description): bool
     {
-        $dismissalPatterns = [
+        $lower = strtolower($description);
+
+        // Strong dismissals — always indicate the AI walked back the finding.
+        // These are never rescued because they express a clear "not a vuln" conclusion.
+        $strongDismissals = [
+            // Direct negations
             'this is not a vulnerability',
             'this is not actually a vulnerability',
             'not actually vulnerable',
@@ -441,29 +451,165 @@ final class ResponseParser
             'not a security vulnerability',
             'not exploitable',
             'not a concern',
-            'already mitigated',
-            'already handled',
-            'already protected',
+            'no actual vulnerability',
+            'no real vulnerability',
+            'no vulnerability',
+            // Self-corrections mid-description
+            'on re-analysis',
+            'after self-check',
+            'removing this finding',
+            'this is by design',
+            'by design for',
+            'this is actually safe',
+            'actually safe',
+            'this is expected behavior',
+            'this is expected behaviour',
+            'this is intentional',
+            'working as intended',
+            'working as designed',
         ];
 
-        $lower = strtolower($description);
-
-        foreach ($dismissalPatterns as $pattern) {
+        foreach ($strongDismissals as $pattern) {
             if (str_contains($lower, $pattern)) {
                 return true;
             }
         }
 
-        // Regex patterns for more complex contradictions
-        $regexPatterns = [
+        // Strong regex dismissals — always indicate the AI walked back the finding.
+        $strongRegexPatterns = [
             '/this is not (?:a |an )?[\w\s]{0,30}(?:issue|vulnerability)/i',
             '/on closer inspection[\s\S]{0,80}(?:not|safe|properly|handled)/i',
             '/fields are explicitly (?:specified|listed|enumerated)/i',
             '/properly (?:controlled|protected|validated|handled)/i',
+            '/more of a (?:code.?smell|best.?practice|style|hygiene)/i',
+            // AI walks back its own finding
+            '/\bon re.?analysis[\s\S]{0,40}(?:safe|design|not|no|false|removing)/i',
+            '/\bafter (?:self.?check|review|analysis)[\s\S]{0,40}(?:safe|remov|not|no)/i',
+            '/\bno (?:actual|real) (?:vulnerability|issue|risk|concern)\b/i',
+            '/\bthis is (?:actually |)(?:safe|secure|by design|expected|intentional)\b/i',
+            '/\bremoving this (?:finding|issue|vulnerability)\b/i',
         ];
 
-        foreach ($regexPatterns as $regex) {
+        foreach ($strongRegexPatterns as $regex) {
             if (preg_match($regex, $description)) {
+                return true;
+            }
+        }
+
+        // Weak mitigation patterns — these acknowledge partial safety but the AI
+        // may still conclude the code is vulnerable. If a rescue counter-pattern
+        // is present (e.g. "but ... is a risk"), the finding is kept.
+        $weakDismissals = [
+            'already mitigated',
+            'already handled',
+            'already protected',
+            'mitigates direct exploitation',
+            'mitigates the risk',
+            'prevents direct exploitation',
+            'more of a code-smell',
+            'more of a code smell',
+            'code quality issue rather than',
+            'not immediately exploitable',
+            'not directly exploitable',
+            'not an immediately exploitable',
+            'no direct exploitation path',
+            'cannot be directly exploited',
+            // Type cast safety
+            'inputs are cast to',
+            'values are cast to int',
+            'integer cast prevents',
+            'cast provides protection',
+        ];
+
+        $weakMatched = false;
+
+        foreach ($weakDismissals as $pattern) {
+            if (str_contains($lower, $pattern)) {
+                $weakMatched = true;
+
+                break;
+            }
+        }
+
+        if (! $weakMatched) {
+            $weakRegexPatterns = [
+                '/\bmitigat(?:es|ed)\b[\s\S]{0,40}\bexploit/i',
+                '/\bcast(?:ed|s|ing)?\b[\s\S]{0,30}\b(?:int|integer)\b[\s\S]{0,30}\b(?:safe|prevent|protect|mitigat)/i',
+                '/although[\s\S]{0,60}(?:prevents?|mitigat|safe|protected)/i',
+                '/however[\s\S]{0,40}(?:the (?:int|integer) cast|casting|not (?:directly|immediately))/i',
+            ];
+
+            foreach ($weakRegexPatterns as $regex) {
+                if (preg_match($regex, $description)) {
+                    $weakMatched = true;
+
+                    break;
+                }
+            }
+        }
+
+        if (! $weakMatched) {
+            return false;
+        }
+
+        // A weak dismissal matched — check for rescue counter-patterns that
+        // indicate the AI still considers this a real vulnerability despite
+        // acknowledging partial mitigation.
+        return ! $this->hasRescueCounter($lower);
+    }
+
+    /**
+     * Check if a description contains adversative phrases that override a
+     * partial-mitigation dismissal, indicating the finding is still valid.
+     *
+     * Detects patterns like "mitigates X, but the architecture is still a risk"
+     * or "although the cast prevents injection, this is a fragile defense".
+     */
+    private function hasRescueCounter(string $lower): bool
+    {
+        $rescuePatterns = [
+            // Adversative conjunctions followed by risk assertions
+            'but the architecture',
+            'but this is still',
+            'but still a',
+            'but remains',
+            'but is a',
+            'but the risk',
+            'but could be',
+            'but it is still',
+            'is a sql injection risk',
+            'is a security risk',
+            'is still a risk',
+            'is still vulnerable',
+            'still a vulnerability',
+            'still exploitable',
+            'fragile defense',
+            'fragile defence',
+            'defense-in-depth failure',
+            'defence-in-depth failure',
+            'string concatenation is a',
+            'building raw sql',
+        ];
+
+        foreach ($rescuePatterns as $pattern) {
+            if (str_contains($lower, $pattern)) {
+                return true;
+            }
+        }
+
+        $rescueRegexPatterns = [
+            // "but ... risk/vulnerability/injection/issue"
+            '/\bbut\b[\s\S]{0,80}\b(?:risk|vulnerab|injection|exploit|fragile|unsafe|danger)/i',
+            // "however ... still|risk|vulnerable"
+            '/\bhowever\b[\s\S]{0,80}\b(?:still|risk|vulnerab|exploit|fragile|unsafe)/i',
+            // "although ... fragile|failure|risk|vulnerable"
+            '/\balthough\b[\s\S]{0,80}\b(?:fragile|failure|risk|vulnerab|exploit|unsafe)/i',
+            // "nonetheless/nevertheless ... risk/vulnerable"
+            '/\bnonetheless|nevertheless\b[\s\S]{0,80}\b(?:risk|vulnerab|exploit)/i',
+        ];
+
+        foreach ($rescueRegexPatterns as $regex) {
+            if (preg_match($regex, $lower)) {
                 return true;
             }
         }

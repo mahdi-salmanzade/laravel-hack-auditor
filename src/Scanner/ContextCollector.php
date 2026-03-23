@@ -89,8 +89,8 @@ class ContextCollector
     /**
      * Collect route definitions that reference the given controller classes.
      *
-     * Reads all PHP files in the routes/ directory and uses regex to parse
-     * route definitions without booting Laravel's router.
+     * Reads all PHP files in the routes/ directory (including subdirectories)
+     * and uses regex to parse route definitions without booting Laravel's router.
      *
      * @param  array<int, string>  $controllerClasses
      * @return array<string, array{method: string, uri: string, middleware: array<int, string>}>
@@ -103,9 +103,9 @@ class ContextCollector
             return [];
         }
 
-        $files = glob($routesPath.DIRECTORY_SEPARATOR.'*.php');
+        $files = $this->findPhpFilesRecursively($routesPath);
 
-        if ($files === false || $files === []) {
+        if ($files === []) {
             return [];
         }
 
@@ -131,6 +131,7 @@ class ContextCollector
             $groupBoundaries = $this->findRouteGroupBoundaries($content);
 
             $this->parseExplicitRoutes($content, $shortClassMap, $groupBoundaries, $results);
+            $this->parseInvokableRoutes($content, $shortClassMap, $groupBoundaries, $results);
             $this->parseResourceRoutes($content, $shortClassMap, $groupBoundaries, $results);
             $this->parseApiResourceRoutes($content, $shortClassMap, $groupBoundaries, $results);
             $this->parseControllerGroupRoutes($content, $shortClassMap, $groupBoundaries, $results);
@@ -166,6 +167,12 @@ class ContextCollector
                     $chain = $match[4][0];
                     $position = $match[0][1];
 
+                    $prefix = $this->getPrefixForPosition($position, $groupBoundaries);
+
+                    if ($prefix !== '') {
+                        $uri = '/'.ltrim($prefix.'/'.ltrim($uri, '/'), '/');
+                    }
+
                     $routeMiddleware = $this->parseChainedMiddleware($chain);
                     $groupMiddleware = $this->getMiddlewareForPosition($position, $groupBoundaries);
                     $allMiddleware = array_values(array_unique(array_merge($groupMiddleware, $routeMiddleware)));
@@ -190,6 +197,12 @@ class ContextCollector
                     $chain = $match[5][0] ?? '';
                     $position = $match[0][1];
 
+                    $prefix = $this->getPrefixForPosition($position, $groupBoundaries);
+
+                    if ($prefix !== '') {
+                        $uri = '/'.ltrim($prefix.'/'.ltrim($uri, '/'), '/');
+                    }
+
                     $routeMiddleware = $this->parseChainedMiddleware($chain);
                     $groupMiddleware = $this->getMiddlewareForPosition($position, $groupBoundaries);
                     $allMiddleware = array_values(array_unique(array_merge($groupMiddleware, $routeMiddleware)));
@@ -205,10 +218,57 @@ class ContextCollector
     }
 
     /**
+     * Parse invokable controller routes (Route::get('/path', Controller::class)).
+     *
+     * @param  array<string, string>  $shortClassMap
+     * @param  array<int, array{middleware: array<int, string>, prefix: string, start: int, end: int}>  $groupBoundaries
+     * @param  array<string, array{method: string, uri: string, middleware: array<int, string>}>  $results
+     */
+    private function parseInvokableRoutes(string $content, array $shortClassMap, array $groupBoundaries, array &$results): void
+    {
+        $httpMethods = 'get|post|put|patch|delete|options|any';
+
+        foreach ($shortClassMap as $shortClass => $fqcn) {
+            $controllerPattern = preg_quote($shortClass, '/');
+
+            // Invokable syntax: Route::get('/path', Controller::class)
+            $pattern = '/Route\s*::\s*('.$httpMethods.')\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*'
+                .$controllerPattern.'\s*::\s*class\s*\)([^;]*);/i';
+
+            if (! preg_match_all($pattern, $content, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
+                continue;
+            }
+
+            foreach ($matches as $match) {
+                $httpMethod = strtoupper($match[1][0]);
+                $uri = '/'.ltrim($match[2][0], '/');
+                $chain = $match[3][0];
+                $position = $match[0][1];
+
+                $prefix = $this->getPrefixForPosition($position, $groupBoundaries);
+
+                if ($prefix !== '') {
+                    $uri = '/'.ltrim($prefix.'/'.ltrim($uri, '/'), '/');
+                }
+
+                $routeMiddleware = $this->parseChainedMiddleware($chain);
+                $groupMiddleware = $this->getMiddlewareForPosition($position, $groupBoundaries);
+                $allMiddleware = array_values(array_unique(array_merge($groupMiddleware, $routeMiddleware)));
+
+                $results["{$fqcn}@__invoke"] = [
+                    'method' => $httpMethod,
+                    'uri' => $uri,
+                    'middleware' => $allMiddleware,
+                ];
+            }
+        }
+    }
+
+    /**
      * Parse Route::resource() definitions.
      *
      * @param  array<string, string>  $shortClassMap
-     * @param  array<int, array{middleware: array<int, string>, start: int, end: int}>  $groupBoundaries
+     * @param  array<int, array{middleware: array<int, string>, prefix: string, start: int, end: int}>  $groupBoundaries
      * @param  array<string, array{method: string, uri: string, middleware: array<int, string>}>  $results
      */
     private function parseResourceRoutes(string $content, array $shortClassMap, array $groupBoundaries, array &$results): void
@@ -227,6 +287,13 @@ class ContextCollector
                 $uri = '/'.ltrim($match[1][0], '/');
                 $chain = $match[2][0];
                 $position = $match[0][1];
+
+                $prefix = $this->getPrefixForPosition($position, $groupBoundaries);
+
+                if ($prefix !== '') {
+                    $uri = '/'.ltrim($prefix.'/'.ltrim($uri, '/'), '/');
+                }
+
                 $param = $this->resourceParam($uri);
 
                 $routeMiddleware = $this->parseChainedMiddleware($chain);
@@ -277,6 +344,13 @@ class ContextCollector
                 $uri = '/'.ltrim($match[1][0], '/');
                 $chain = $match[2][0];
                 $position = $match[0][1];
+
+                $prefix = $this->getPrefixForPosition($position, $groupBoundaries);
+
+                if ($prefix !== '') {
+                    $uri = '/'.ltrim($prefix.'/'.ltrim($uri, '/'), '/');
+                }
+
                 $param = $this->resourceParam($uri);
 
                 $routeMiddleware = $this->parseChainedMiddleware($chain);
@@ -345,6 +419,10 @@ class ContextCollector
                     array_merge($parentGroupMiddleware, $controllerGroupMiddleware)
                 ));
 
+                $parentPrefix = $this->getPrefixForPosition($match[0][1], $groupBoundaries);
+                $chainPrefix = $this->parseChainedPrefix($chainBetween);
+                $controllerGroupPrefix = $this->combinePrefixes($parentPrefix, $chainPrefix);
+
                 $groupBody = substr($content, $groupOpenBrace + 1, $closingBrace - $groupOpenBrace - 1);
 
                 $routePattern = '/Route\s*::\s*('.$httpMethods.')\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)([^;]*);/i';
@@ -355,6 +433,10 @@ class ContextCollector
                         $uri = '/'.ltrim($routeMatch[2], '/');
                         $methodName = $routeMatch[3];
                         $chain = $routeMatch[4] ?? '';
+
+                        if ($controllerGroupPrefix !== '') {
+                            $uri = '/'.ltrim($controllerGroupPrefix.'/'.ltrim($uri, '/'), '/');
+                        }
 
                         $routeMiddleware = $this->parseChainedMiddleware($chain);
                         $allMiddleware = array_values(array_unique(
@@ -875,29 +957,30 @@ class ContextCollector
      */
     private function parseAuthorizeMethod(string $content): string
     {
-        // Match authorize() method body
-        if (preg_match('/function\s+authorize\s*\(\s*\)\s*(?::\s*bool\s*)?\{(.*?)\}/s', $content, $match)) {
-            $body = trim($match[1]);
+        $body = $this->extractMethodBody($content, 'authorize');
 
-            if (preg_match('/return\s+true\s*;/', $body)) {
-                return 'returns true';
-            }
-
-            if (preg_match('/return\s+false\s*;/', $body)) {
-                return 'returns false';
-            }
-
-            // Summarize the logic
-            $body = preg_replace('/\s+/', ' ', $body) ?? $body;
-
-            if (strlen($body) > 200) {
-                $body = substr($body, 0, 200).'...';
-            }
-
-            return $body;
+        if ($body === null) {
+            return 'not defined (defaults to false)';
         }
 
-        return 'not defined (defaults to false)';
+        $body = trim($body);
+
+        if (preg_match('/return\s+true\s*;/', $body)) {
+            return 'returns true';
+        }
+
+        if (preg_match('/return\s+false\s*;/', $body)) {
+            return 'returns false';
+        }
+
+        // Summarize the logic
+        $body = preg_replace('/\s+/', ' ', $body) ?? $body;
+
+        if (strlen($body) > 200) {
+            $body = substr($body, 0, 200).'...';
+        }
+
+        return $body;
     }
 
     /**
@@ -907,12 +990,11 @@ class ContextCollector
      */
     private function parseRulesMethod(string $content): array
     {
-        // Match rules() method body
-        if (! preg_match('/function\s+rules\s*\(\s*\)\s*(?::\s*array\s*)?\{(.*?)\}/s', $content, $match)) {
+        $body = $this->extractMethodBody($content, 'rules');
+
+        if ($body === null) {
             return [];
         }
-
-        $body = $match[1];
 
         // Try to extract the return array
         if (! preg_match('/return\s*\[(.*)\]\s*;/s', $body, $arrayMatch)) {
@@ -932,6 +1014,46 @@ class ContextCollector
         }
 
         return $rules;
+    }
+
+    /**
+     * Extract the body of a named method using brace-counting.
+     *
+     * Handles nested braces (if/else, closures, etc.) correctly by counting
+     * opening and closing braces rather than using non-greedy regex.
+     */
+    private function extractMethodBody(string $content, string $methodName): ?string
+    {
+        // Find the method signature and opening brace
+        $pattern = '/function\s+'.$methodName.'\s*\([^)]*\)\s*(?::\s*\S+\s*)?\{/s';
+
+        if (! preg_match($pattern, $content, $match, PREG_OFFSET_CAPTURE)) {
+            return null;
+        }
+
+        $openBracePos = (int) $match[0][1] + strlen($match[0][0]) - 1;
+        $depth = 1;
+        $pos = $openBracePos + 1;
+        $len = strlen($content);
+
+        while ($pos < $len && $depth > 0) {
+            $char = $content[$pos];
+
+            if ($char === '{') {
+                $depth++;
+            } elseif ($char === '}') {
+                $depth--;
+            }
+
+            $pos++;
+        }
+
+        if ($depth !== 0) {
+            return null;
+        }
+
+        // Return everything between the opening and closing braces
+        return substr($content, $openBracePos + 1, $pos - $openBracePos - 2);
     }
 
     /**
@@ -1239,21 +1361,51 @@ class ContextCollector
     }
 
     /**
+     * Recursively find all PHP files in a directory.
+     *
+     * @return array<int, string>
+     */
+    private function findPhpFilesRecursively(string $directory): array
+    {
+        $files = [];
+
+        $topLevel = glob($directory.DIRECTORY_SEPARATOR.'*.php');
+
+        if ($topLevel !== false) {
+            $files = $topLevel;
+        }
+
+        $dirs = glob($directory.DIRECTORY_SEPARATOR.'*', GLOB_ONLYDIR);
+
+        if ($dirs !== false) {
+            foreach ($dirs as $subDir) {
+                $files = array_merge($files, $this->findPhpFilesRecursively($subDir));
+            }
+        }
+
+        return $files;
+    }
+
+    /**
      * Extract a PHP array property's string values using regex.
+     *
+     * Uses bracket-depth tracking to correctly handle nested arrays and
+     * multi-line definitions instead of non-greedy `(.*?)` which fails
+     * when the array contains nested brackets.
      *
      * @return array<int, string>
      */
     private function parsePhpArray(string $content, string $propertyName): array
     {
-        $escapedName = preg_quote($propertyName, '/');
+        $arrayContent = $this->extractArrayContent($content, $propertyName);
 
-        if (! preg_match('/\$'.$escapedName.'\s*=\s*\[(.*?)\];/s', $content, $match)) {
+        if ($arrayContent === null) {
             return [];
         }
 
         $values = [];
 
-        if (preg_match_all("/['\"]([^'\"]+)['\"]/", $match[1], $valueMatches)) {
+        if (preg_match_all("/['\"]([^'\"]+)['\"]/", $arrayContent, $valueMatches)) {
             $values = $valueMatches[1];
         }
 
@@ -1263,25 +1415,62 @@ class ContextCollector
     /**
      * Extract a PHP associative array property's key-value pairs using regex.
      *
+     * Uses bracket-depth tracking to correctly handle nested arrays.
+     *
      * @return array<string, string>
      */
     private function parsePhpAssociativeArray(string $content, string $propertyName): array
     {
-        $escapedName = preg_quote($propertyName, '/');
+        $arrayContent = $this->extractArrayContent($content, $propertyName);
 
-        if (! preg_match('/\$'.$escapedName.'\s*=\s*\[(.*?)\];/s', $content, $match)) {
+        if ($arrayContent === null) {
             return [];
         }
 
         $values = [];
 
-        if (preg_match_all("/['\"]([^'\"]+)['\"]\s*=>\s*['\"]?([^'\",\]\s]+)['\"]?/", $match[1], $valueMatches, PREG_SET_ORDER)) {
+        if (preg_match_all("/['\"]([^'\"]+)['\"]\s*=>\s*['\"]?([^'\",\]\s]+)['\"]?/", $arrayContent, $valueMatches, PREG_SET_ORDER)) {
             foreach ($valueMatches as $valueMatch) {
                 $values[$valueMatch[1]] = rtrim($valueMatch[2], ',');
             }
         }
 
         return $values;
+    }
+
+    /**
+     * Extract the content between brackets of a PHP array property definition.
+     *
+     * Tracks bracket depth to correctly find the matching closing bracket,
+     * even when the array contains nested arrays or comments with brackets.
+     */
+    private function extractArrayContent(string $content, string $propertyName): ?string
+    {
+        $escapedName = preg_quote($propertyName, '/');
+
+        if (! preg_match('/\$'.$escapedName.'\s*=\s*\[/s', $content, $match, PREG_OFFSET_CAPTURE)) {
+            return null;
+        }
+
+        $startOffset = $match[0][1] + strlen($match[0][0]);
+        $depth = 1;
+        $length = strlen($content);
+        $pos = $startOffset;
+
+        while ($pos < $length && $depth > 0) {
+            if ($content[$pos] === '[') {
+                $depth++;
+            } elseif ($content[$pos] === ']') {
+                $depth--;
+            }
+            $pos++;
+        }
+
+        if ($depth !== 0) {
+            return null;
+        }
+
+        return substr($content, $startOffset, $pos - $startOffset - 1);
     }
 
     /**
@@ -1348,7 +1537,7 @@ class ContextCollector
 
         if (preg_match_all('/function\s+\w+\s*\(([^)]*)\)/s', $content, $matches)) {
             foreach ($matches[1] as $params) {
-                if (preg_match_all('/(\w+)\s+\$\w+/', $params, $paramMatches)) {
+                if (preg_match_all('/\??(\w+)\s+\$\w+/', $params, $paramMatches)) {
                     foreach ($paramMatches[1] as $typeHint) {
                         if (isset($uses[$typeHint]) && str_contains($uses[$typeHint], 'Requests\\')) {
                             $formRequests[] = $uses[$typeHint];
@@ -1504,20 +1693,26 @@ class ContextCollector
     }
 
     /**
-     * Find all middleware group boundaries in route file content.
+     * Find all route group boundaries, extracting middleware and prefix.
      *
-     * @return array<int, array{middleware: array<int, string>, start: int, end: int}>
+     * Handles fluent chains like Route::middleware(...)->group(),
+     * Route::prefix(...)->middleware(...)->group(),
+     * Route::prefix(...)->group(), and array-style Route::group([...]).
+     *
+     * @return array<int, array{middleware: array<int, string>, prefix: string, start: int, end: int}>
      */
     private function findRouteGroupBoundaries(string $content): array
     {
         $boundaries = [];
 
-        // Route::middleware(...)->...->group(function () { ... })
-        $pattern = '/Route\s*::\s*middleware\s*\(\s*('.$this->middlewareValuePattern().')\s*\)/s';
+        // Fluent chain: Route::(middleware|prefix)(...)->...->group(function () { ... })
+        // Matches both Route::middleware(...) and Route::prefix(...) as chain starters
+        $chainPattern = '/Route\s*::\s*(middleware|prefix)\s*\(\s*([^)]+)\s*\)/s';
 
-        if (preg_match_all($pattern, $content, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
+        if (preg_match_all($chainPattern, $content, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
             foreach ($matches as $match) {
-                $middlewareRaw = $match[1][0];
+                $firstMethod = $match[1][0];
+                $firstValue = trim($match[2][0]);
                 $matchEnd = $match[0][1] + strlen($match[0][0]);
 
                 $groupOpenBrace = $this->findGroupCallAfter($content, $matchEnd);
@@ -1532,17 +1727,51 @@ class ContextCollector
                     continue;
                 }
 
-                $middleware = $this->parseMiddlewareValue($middlewareRaw);
+                // Parse the chain between the initial call and the group brace for additional calls
+                $chainBetween = substr($content, $matchEnd, $groupOpenBrace - $matchEnd);
+
+                $middleware = [];
+                $prefix = '';
+
+                // Set values from the first method
+                if ($firstMethod === 'middleware') {
+                    $middleware = $this->parseMiddlewareValue($firstValue);
+                    $prefix = $this->parseChainedPrefix($chainBetween);
+                } else {
+                    $prefix = $this->parsePrefixValue($firstValue);
+                    $middleware = $this->parseChainedMiddleware($chainBetween);
+                }
+
+                // Also pick up additional chained middleware or prefix
+                if ($firstMethod === 'middleware') {
+                    // Already got middleware from first call; also check chain for more middleware
+                    $chainedMiddleware = $this->parseChainedMiddleware($chainBetween);
+                    $middleware = array_values(array_unique(array_merge($middleware, $chainedMiddleware)));
+                } else {
+                    // Already got prefix from first call; also check chain for more prefix
+                    $chainedPrefix = $this->parseChainedPrefix($chainBetween);
+
+                    if ($chainedPrefix !== '' && $prefix !== '') {
+                        // Chain prefix is unlikely to add to prefix, but handle it
+                    } elseif ($chainedPrefix !== '') {
+                        $prefix = $chainedPrefix;
+                    }
+                }
+
+                if ($middleware === [] && $prefix === '') {
+                    continue;
+                }
 
                 $boundaries[] = [
                     'middleware' => $middleware,
+                    'prefix' => $prefix,
                     'start' => $groupOpenBrace,
                     'end' => $closingBrace,
                 ];
             }
         }
 
-        // Route::group(['middleware' => ...], function () { ... })
+        // Route::group(['middleware' => ..., 'prefix' => ...], function () { ... })
         $arrayPattern = '/Route\s*::\s*group\s*\(\s*\[([^\]]*)\]\s*,/s';
 
         if (preg_match_all($arrayPattern, $content, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
@@ -1550,9 +1779,18 @@ class ContextCollector
                 $arrayContent = $match[1][0];
                 $matchEnd = $match[0][1] + strlen($match[0][0]);
 
+                $middleware = [];
+                $prefix = '';
+
                 if (preg_match('/[\'"]middleware[\'"]\s*=>\s*('.$this->middlewareValuePattern().')/s', $arrayContent, $mwMatch)) {
                     $middleware = $this->parseMiddlewareValue($mwMatch[1]);
-                } else {
+                }
+
+                if (preg_match('/[\'"]prefix[\'"]\s*=>\s*[\'"]([^\'"]+)[\'"]/', $arrayContent, $prefixMatch)) {
+                    $prefix = trim($prefixMatch[1], '/');
+                }
+
+                if ($middleware === [] && $prefix === '') {
                     continue;
                 }
 
@@ -1570,6 +1808,7 @@ class ContextCollector
 
                 $boundaries[] = [
                     'middleware' => $middleware,
+                    'prefix' => $prefix,
                     'start' => $openBrace,
                     'end' => $closingBrace,
                 ];
@@ -1596,6 +1835,62 @@ class ContextCollector
         }
 
         return array_values(array_unique($middleware));
+    }
+
+    /**
+     * Determine the combined prefix for a given byte position from enclosing groups.
+     *
+     * @param  array<int, array{middleware: array<int, string>, prefix: string, start: int, end: int}>  $groupBoundaries
+     */
+    private function getPrefixForPosition(int $position, array $groupBoundaries): string
+    {
+        $prefixes = [];
+
+        foreach ($groupBoundaries as $group) {
+            if ($position > $group['start'] && $position < $group['end'] && ($group['prefix'] ?? '') !== '') {
+                $prefixes[] = $group['prefix'];
+            }
+        }
+
+        return implode('/', $prefixes);
+    }
+
+    /**
+     * Parse a prefix value from a ->prefix() argument string.
+     */
+    private function parsePrefixValue(string $value): string
+    {
+        $value = trim($value);
+
+        if (preg_match('/^[\'"]([^\'"]+)[\'"]$/', $value, $match)) {
+            return trim($match[1], '/');
+        }
+
+        return '';
+    }
+
+    /**
+     * Parse a ->prefix() call from a method chain string.
+     */
+    private function parseChainedPrefix(string $chain): string
+    {
+        if (preg_match('/->prefix\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)/', $chain, $match)) {
+            return trim($match[1], '/');
+        }
+
+        return '';
+    }
+
+    /**
+     * Combine two prefix segments, handling empty values.
+     */
+    private function combinePrefixes(string $first, string $second): string
+    {
+        if ($first !== '' && $second !== '') {
+            return $first.'/'.$second;
+        }
+
+        return $first.$second;
     }
 
     /**

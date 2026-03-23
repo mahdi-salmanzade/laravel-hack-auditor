@@ -25,11 +25,7 @@ That's it. Two commands. Watch 12 vulnerabilities get ripped out of a controller
 
 ---
 
-> We scanned a real production Laravel app (42 controllers). Score: **35/100**. Top finding: a test endpoint returning **real OTP codes** in JSON — full account takeover. [See the full report.](SCAN_RESULTS.md)
-
----
-
-## Four commands. That's the whole package.
+## Six commands. That's the whole package.
 
 ```bash
 php artisan hack:demo                   # See it in action (no API key)
@@ -37,19 +33,34 @@ php artisan hack:scan                   # Scan YOUR app with AI
 php artisan hack:scan --diff --html     # Scan only changed files, export HTML report
 php artisan hack:ctf sql_injection      # Turn vulns into CTF challenges
 php artisan hack:report --latest        # Generate HTML report from saved scan
+php artisan hack:help                   # Full command reference
+php artisan hack:usage                  # Token usage & cost stats
 ```
 
 **`hack:scan` finds what PHPStan and Snyk can't:**
 - "This endpoint fetches a user by ID but never checks ownership" *(IDOR)*
 - "Admin check reads `is_admin` from the request, not the session" *(Auth bypass)*
 - "Login route has no throttle middleware" *(Brute-forceable)*
-- "Room owner can add any user by ID without consent" *(Design-level access control)*
+- "Any authenticated user can set their own plan to 'pro' without payment" *(Auth bypass)*
 
 12 vulnerability types. OWASP Top 10 mapped. Every finding has file, line, explanation, and a copy-paste fix.
 
 ### Low false-positive rate
 
-v1.2 reads your actual Laravel runtime — route middleware stacks, FormRequest `authorize()` methods, Eloquent `$fillable`/`$hidden` — and feeds it to the AI before analysis. Self-contradicting findings are auto-suppressed. Unrouted controller methods are skipped. The result: findings you actually need to fix, not noise.
+v1.4 reads your actual Laravel architecture — route middleware stacks, FormRequest `authorize()` methods, Eloquent `$fillable`/`$hidden`, policies, global scopes — and feeds it all to the AI before analysis. Data-flow tracing distinguishes user input from config/hardcoded values. Self-contradicting findings are auto-suppressed. Unrouted controller methods are skipped. Rate limiting is only flagged on auth/payment endpoints, not every route.
+
+Tested on production Laravel apps with 15-42 controllers. Findings you actually need to fix, not noise.
+
+### Token usage & cost tracking
+
+Every scan shows token consumption and estimated cost. Auto-detects your AI provider's pricing from a built-in registry of 30+ models (Anthropic, OpenAI, Gemini, xAI, Ollama). Budget your scans with `--limit`.
+
+```
+Token Usage ...... 97,188 prompt + 3,080 completion = 100,268 total
+AI Requests ...... 7
+Estimated Cost ... $0.5629
+Model ............ claude-opus-4-6 (anthropic)
+```
 
 ## Quick setup (2 minutes)
 
@@ -86,11 +97,12 @@ HACK_AUDITOR_AI_MODEL=claude-opus-4-6
 | `--fix` | Include fix suggestions |
 | `--json` | JSON output for CI/CD |
 | `--html` | Generate HTML report |
-| `--save` | Save to database |
+| `--save` | Save results to JSON file |
 | `--force` | Skip confirmation prompt |
 | `--detailed` | Full descriptions in table |
 | `--diff` | Only scan git-changed files (great for CI) |
 | `--base=develop` | Base branch for `--diff` |
+| `--limit=50000` | Cap token budget for the scan |
 | `--update-baseline` | Save current findings as baseline |
 | `--no-baseline` | Ignore baseline file |
 
@@ -117,7 +129,7 @@ php artisan hack:scan --update-baseline # Accept current findings as known
 php artisan hack:report --latest        # Regenerate report from saved scan
 ```
 
-The HTML report is a single self-contained file — dark theme, animated score ring, collapsible cards, copy-paste code blocks. Professional enough to attach to a security audit.
+The HTML report is a single self-contained file — dark theme, animated score ring, collapsible cards, copy-paste code blocks, token usage breakdown. Professional enough to attach to a security audit.
 
 `--diff` scans only what your PR touches. `--update-baseline` lets teams acknowledge known risks so CI doesn't fail on accepted findings.
 
@@ -125,6 +137,7 @@ The HTML report is a single self-contained file — dark theme, animated score r
 
 ```php
 use Mahdi\HackAuditor\Facades\HackAuditor;
+use Mahdi\HackAuditor\Support\UsageTracker;
 
 $report = HackAuditor::scan();
 
@@ -132,8 +145,19 @@ if ($report->hasCritical()) {
     // Block deployment, alert Slack, panic, etc.
 }
 
-echo $report->overallScore;    // 0-100
-echo $report->criticalCount(); // int
+echo $report->overallScore;                  // 0-100
+echo $report->criticalCount();               // int
+echo $report->getUsageTracker()?->totalTokens();  // tokens used
+echo $report->getUsageTracker()?->estimateCost();  // estimated $$$
+
+// Budget-capped scan
+$tracker = new UsageTracker(tokenLimit: 50_000);
+$report = HackAuditor::scan(tracker: $tracker);
+
+// Scan history
+$history = HackAuditor::history();
+$latest = $history->latest();                // array or null
+$all = $history->recent(10);                 // last 10 scans
 ```
 
 <details>
@@ -152,7 +176,7 @@ jobs:
         with:
           php-version: '8.3'
       - run: composer install --no-interaction
-      - run: php artisan hack:scan --json --severity=High
+      - run: php artisan hack:scan --json --severity=High --force
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
@@ -175,15 +199,14 @@ php artisan vendor:publish --tag=hack-auditor-config
 | `scan.paths` | Controllers, Models, Requests, Middleware, routes | What to scan |
 | `scan.confirm_above_files` | `20` | Prompt before large scans |
 | `scan.sensitive_patterns` | `.env*, *.key, *.pem, storage/logs/*` | Always excluded |
-| `history.enabled` | `true` | Save results to database |
-| `ctf.output_path` | `storage/hack-auditor/ctf` | CTF output directory |
+| `context.enabled` | `true` | Context-aware scanning (routes, middleware, policies, models) |
+| `context.max_context_tokens` | `8000` | Token budget for context |
+| `usage.default_limit` | `0` | Default `--limit` value (0 = unlimited) |
+| `usage.show_usage` | `true` | Show token usage after scan |
+| `usage.log_enabled` | `true` | Auto-log usage to `storage/hack-auditor/usage.json` |
+| `ctf.output_path` | `hack-auditor/ctf` | CTF output directory |
 
-Optional database history:
-
-```bash
-php artisan vendor:publish --tag=hack-auditor-migrations
-php artisan migrate
-```
+Zero database dependencies. All data stored as JSON files in `storage/hack-auditor/`.
 
 </details>
 

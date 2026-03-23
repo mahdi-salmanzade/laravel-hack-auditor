@@ -114,25 +114,37 @@ class RouteAnalyzer
             }
         }
 
-        // Resource routes: Route::resource('name', Controller::class)
+        // Resource routes: Route::resource('name', Controller::class) with optional chained calls
         $resourcePattern = '/Route\s*::\s*(apiResource|resource)\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*'
-            .$controllerPattern.'\s*::\s*class\s*\)/i';
+            .$controllerPattern.'\s*::\s*class\s*\)([^;]*);/i';
 
         if (preg_match_all($resourcePattern, $content, $matches, PREG_SET_ORDER)) {
             foreach ($matches as $match) {
                 $isApi = strtolower($match[1]) === 'apiresource';
                 $uri = '/'.ltrim($match[2], '/');
                 $param = $this->resourceParam($uri);
+                $chain = $match[3] ?? '';
 
-                $methods['index'] = "GET {$uri}";
-                $methods['store'] = "POST {$uri}";
-                $methods['show'] = "GET {$uri}/{{$param}}";
-                $methods['update'] = "PUT/PATCH {$uri}/{{$param}}";
-                $methods['destroy'] = "DELETE {$uri}/{{$param}}";
+                $allResourceMethods = $isApi
+                    ? ['index', 'store', 'show', 'update', 'destroy']
+                    : ['index', 'create', 'store', 'show', 'edit', 'update', 'destroy'];
 
-                if (! $isApi) {
-                    $methods['create'] = "GET {$uri}/create";
-                    $methods['edit'] = "GET {$uri}/{{$param}}/edit";
+                $filteredMethods = $this->filterResourceMethods($allResourceMethods, $chain);
+
+                $routeMap = [
+                    'index' => "GET {$uri}",
+                    'store' => "POST {$uri}",
+                    'show' => "GET {$uri}/{{$param}}",
+                    'update' => "PUT/PATCH {$uri}/{{$param}}",
+                    'destroy' => "DELETE {$uri}/{{$param}}",
+                    'create' => "GET {$uri}/create",
+                    'edit' => "GET {$uri}/{{$param}}/edit",
+                ];
+
+                foreach ($filteredMethods as $method) {
+                    if (isset($routeMap[$method])) {
+                        $methods[$method] = $routeMap[$method];
+                    }
                 }
             }
         }
@@ -173,7 +185,7 @@ class RouteAnalyzer
     }
 
     /**
-     * Get all PHP files from the routes/ directory.
+     * Get all PHP files from the routes/ directory, including subdirectories.
      *
      * @return array<int, string>
      */
@@ -185,11 +197,19 @@ class RouteAnalyzer
             return [];
         }
 
-        $files = glob($routesPath.DIRECTORY_SEPARATOR.'*.php');
+        $files = [];
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($routesPath, \RecursiveDirectoryIterator::SKIP_DOTS),
+        );
 
-        if ($files === false) {
-            return [];
+        foreach ($iterator as $file) {
+            /** @var \SplFileInfo $file */
+            if ($file->isFile() && $file->getExtension() === 'php') {
+                $files[] = $file->getRealPath();
+            }
         }
+
+        sort($files);
 
         return $files;
     }
@@ -616,21 +636,45 @@ class RouteAnalyzer
             $uri = '/'.ltrim($match[2][0], '/');
             $chain = $match[3][0];
             $position = $match[0][1];
+            $param = $this->resourceParam($uri);
 
             $routeMiddleware = $this->parseChainedMiddleware($chain);
             $groupMiddleware = $this->getMiddlewareForPosition($position, $groupBoundaries);
             $allMiddleware = array_values(array_unique(array_merge($groupMiddleware, $routeMiddleware)));
 
-            $results["GET {$uri}"] = $allMiddleware;
-            $results["POST {$uri}"] = $allMiddleware;
-            $results["GET {$uri}/{".$this->resourceParam($uri).'}'] = $allMiddleware;
-            $results["PUT {$uri}/{".$this->resourceParam($uri).'}'] = $allMiddleware;
-            $results["PATCH {$uri}/{".$this->resourceParam($uri).'}'] = $allMiddleware;
-            $results["DELETE {$uri}/{".$this->resourceParam($uri).'}'] = $allMiddleware;
+            $allResourceMethods = $isApi
+                ? ['index', 'store', 'show', 'update', 'destroy']
+                : ['index', 'create', 'store', 'show', 'edit', 'update', 'destroy'];
 
-            if (! $isApi) {
-                $results["GET {$uri}/create"] = $allMiddleware;
-                $results["GET {$uri}/{".$this->resourceParam($uri).'}/edit'] = $allMiddleware;
+            $filteredMethods = $this->filterResourceMethods($allResourceMethods, $chain);
+
+            $routeMap = [
+                'index' => "GET {$uri}",
+                'store' => "POST {$uri}",
+                'show' => "GET {$uri}/{{$param}}",
+                'update' => "PUT {$uri}/{{$param}}",
+                'destroy' => "DELETE {$uri}/{{$param}}",
+                'create' => "GET {$uri}/create",
+                'edit' => "GET {$uri}/{{$param}}/edit",
+            ];
+
+            // For middleware context, PUT and PATCH are separate entries
+            $middlewareRouteMap = [
+                'index' => ["GET {$uri}"],
+                'store' => ["POST {$uri}"],
+                'show' => ["GET {$uri}/{{$param}}"],
+                'update' => ["PUT {$uri}/{{$param}}", "PATCH {$uri}/{{$param}}"],
+                'destroy' => ["DELETE {$uri}/{{$param}}"],
+                'create' => ["GET {$uri}/create"],
+                'edit' => ["GET {$uri}/{{$param}}/edit"],
+            ];
+
+            foreach ($filteredMethods as $method) {
+                if (isset($middlewareRouteMap[$method])) {
+                    foreach ($middlewareRouteMap[$method] as $routeKey) {
+                        $results[$routeKey] = $allMiddleware;
+                    }
+                }
             }
         }
     }
@@ -758,6 +802,37 @@ class RouteAnalyzer
         }
 
         return [];
+    }
+
+    /**
+     * Filter resource methods based on ->only() and ->except() chained calls.
+     *
+     * @param  array<int, string>  $allMethods
+     * @return array<int, string>
+     */
+    private function filterResourceMethods(array $allMethods, string $chain): array
+    {
+        // Check for ->only(['index', 'show'])
+        if (preg_match('/->only\s*\(\s*\[([^\]]+)\]\s*\)/', $chain, $onlyMatch)) {
+            $onlyMethods = [];
+            if (preg_match_all('/[\'"]([^\'"]+)[\'"]/', $onlyMatch[1], $names)) {
+                $onlyMethods = $names[1];
+            }
+
+            return array_values(array_intersect($allMethods, $onlyMethods));
+        }
+
+        // Check for ->except(['create', 'edit'])
+        if (preg_match('/->except\s*\(\s*\[([^\]]+)\]\s*\)/', $chain, $exceptMatch)) {
+            $exceptMethods = [];
+            if (preg_match_all('/[\'"]([^\'"]+)[\'"]/', $exceptMatch[1], $names)) {
+                $exceptMethods = $names[1];
+            }
+
+            return array_values(array_diff($allMethods, $exceptMethods));
+        }
+
+        return $allMethods;
     }
 
     /**
