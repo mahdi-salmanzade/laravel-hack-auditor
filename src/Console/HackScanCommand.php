@@ -119,21 +119,27 @@ final class HackScanCommand extends Command
             }
         }
 
+        $scanCallback = function () use ($scanner, $path): VulnerabilityReport {
+            if ($this->option('diff')) {
+                return $this->scanDiff($scanner);
+            }
+
+            if (is_string($path) && $path !== '') {
+                return $scanner->scanFile($path);
+            }
+
+            return $scanner->scan();
+        };
+
         /** @var VulnerabilityReport $report */
-        $report = spin(
-            callback: function () use ($scanner, $path): VulnerabilityReport {
-                if ($this->option('diff')) {
-                    return $this->scanDiff($scanner);
-                }
-
-                if (is_string($path) && $path !== '') {
-                    return $scanner->scanFile($path);
-                }
-
-                return $scanner->scan();
-            },
-            message: 'Analyzing files with AI...',
-        );
+        if ($this->option('json')) {
+            $report = $scanCallback();
+        } else {
+            $report = spin(
+                callback: $scanCallback,
+                message: 'Analyzing files with AI...',
+            );
+        }
 
         $elapsedMs = (int) ((hrtime(true) - $startTime) / 1_000_000);
         $minimumSeverity = SeverityLevel::fromString((string) $this->option('severity'));
