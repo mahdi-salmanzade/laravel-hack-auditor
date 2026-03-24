@@ -35,6 +35,14 @@ final class CodeExtractor
             ? substr($realPath, strlen($basePath))
             : $realPath;
 
+        if (is_dir($realPath)) {
+            return [
+                'path' => $file->getPathname(),
+                'content' => '',
+                'type' => 'other',
+            ];
+        }
+
         $content = (string) file_get_contents($realPath);
         $cleanedContent = $this->cleanContent($content);
         $type = $this->detectType($content, $relativePath);
