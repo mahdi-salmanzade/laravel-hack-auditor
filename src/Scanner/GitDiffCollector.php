@@ -125,18 +125,26 @@ class GitDiffCollector
      */
     private function diffAgainstBranch(string $branch): ?array
     {
-        $command = sprintf(
-            "git diff --name-only --diff-filter=ACMR %s...HEAD -- '*.php'",
-            escapeshellarg($branch),
-        );
+        // Try local branch first, then origin/ remote ref (needed in CI
+        // where GitHub Actions only checks out the PR branch locally).
+        $refs = [$branch, "origin/{$branch}"];
 
-        exec($command.' 2>/dev/null', $output, $exitCode);
+        foreach ($refs as $ref) {
+            $command = sprintf(
+                "git diff --name-only --diff-filter=ACMR %s...HEAD -- '*.php'",
+                escapeshellarg($ref),
+            );
 
-        if ($exitCode !== 0) {
-            return null;
+            exec($command.' 2>/dev/null', $output, $exitCode);
+
+            if ($exitCode === 0) {
+                return $output;
+            }
+
+            $output = [];
         }
 
-        return $output;
+        return null;
     }
 
     /**
