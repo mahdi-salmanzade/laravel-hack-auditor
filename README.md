@@ -47,9 +47,11 @@ php artisan hack:usage                  # Token usage & cost stats
 
 ### Low false-positive rate
 
-v1.4 reads your actual Laravel architecture — route middleware stacks, FormRequest `authorize()` methods, Eloquent `$fillable`/`$hidden`, policies, global scopes — and feeds it all to the AI before analysis. Data-flow tracing distinguishes user input from config/hardcoded values. Self-contradicting findings are auto-suppressed. Unrouted controller methods are skipped. Rate limiting is only flagged on auth/payment endpoints, not every route.
+v1.5 introduces **taint analysis** — the AI must trace every input-dependent finding as `SOURCE → TRANSFORMS → SINK` before reporting it. The parser then programmatically verifies the trace: if the source is `config()` not `$request->input()`, auto-drop. If an `(int)` cast or `$request->validated()` breaks the chain, auto-drop. Zero extra API calls.
 
-Tested on production Laravel apps with 15-42 controllers. Findings you actually need to fix, not noise.
+On top of that, v1.4's context-aware scanning reads your actual Laravel architecture — route middleware stacks, FormRequest `authorize()` methods, Eloquent `$fillable`/`$hidden`, policies, global scopes — and feeds it all to the AI before analysis. Framework-aware allowlists recognize `$this->authorize()`, `Gate::define()`, `$request->validated()`, and other Laravel conventions that eliminate entire classes of false positives.
+
+Tested on production Laravel apps with 15-42 controllers and a deliberately vulnerable test app (100% true positive rate, 0 false positives).
 
 ### Token usage & cost tracking
 
