@@ -14,6 +14,7 @@ use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
  * @method static string generateCTF(string $type, ?string $code = null)
  * @method static int score()
  * @method static \Mahdi\HackAuditor\Support\ScanHistory history()
+ * @method static string generateReport(\Mahdi\HackAuditor\Scanner\VulnerabilityReport $report, array $meta = [])
  *
  * @see HackAuditorManager
  */

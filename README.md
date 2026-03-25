@@ -105,8 +105,31 @@ HACK_AUDITOR_AI_MODEL=claude-opus-4-6
 | `--diff` | Only scan git-changed files (great for CI) |
 | `--base=develop` | Base branch for `--diff` |
 | `--limit=50000` | Cap token budget for the scan |
+| `--baseline` | Apply baseline to suppress known findings (auto-applied if file exists) |
 | `--update-baseline` | Save current findings as baseline |
 | `--no-baseline` | Ignore baseline file |
+
+</details>
+
+<details>
+<summary><strong>Report flags</strong></summary>
+
+| Flag | What it does |
+|------|-------------|
+| `--latest` | Generate report from the most recent saved scan |
+| `--id=ULID` | Generate report from a specific scan ID |
+| `--output=path` | Custom output file path |
+
+</details>
+
+<details>
+<summary><strong>Usage flags</strong></summary>
+
+| Flag | What it does |
+|------|-------------|
+| `--days=30` | Show usage from the last N days (default: 30) |
+| `--json` | Output as JSON |
+| `--clear` | Clear the usage log |
 
 </details>
 
@@ -197,16 +220,35 @@ php artisan vendor:publish --tag=hack-auditor-config
 | `ai.provider` | `null` | AI provider override |
 | `ai.model` | `null` | Model override |
 | `ai.temperature` | `0.3` | Lower = more deterministic |
+| `ai.max_tokens` | `4096` | Max tokens per AI response |
 | `ai.timeout` | `120` | HTTP timeout in seconds |
 | `scan.paths` | Controllers, Models, Requests, Middleware, routes | What to scan |
+| `scan.exclude` | `*/vendor/*, */node_modules/*, */tests/*` | Excluded paths |
+| `scan.file_extensions` | `['.php']` | File extensions to scan |
+| `scan.max_file_size_kb` | `500` | Skip files larger than this |
+| `scan.chunk_size` | `10` | Files per AI request |
 | `scan.confirm_above_files` | `20` | Prompt before large scans |
 | `scan.sensitive_patterns` | `.env*, *.key, *.pem, storage/logs/*` | Always excluded |
+| `scan.diff_base_branch` | `null` | Base branch for `--diff` (auto-detects main/master) |
+| `scan.baseline_path` | `base_path('hack-auditor-baseline.json')` | Path to baseline JSON file |
 | `context.enabled` | `true` | Context-aware scanning (routes, middleware, policies, models) |
 | `context.max_context_tokens` | `8000` | Token budget for context |
+| `context.include_routes` | `true` | Include route info in context |
+| `context.include_middleware` | `true` | Include middleware info in context |
+| `context.include_policies` | `true` | Include policy info in context |
+| `context.include_form_requests` | `true` | Include form request info in context |
+| `context.include_models` | `true` | Include model info in context |
+| `context.extra_context_paths` | `[]` | Additional paths to include in context |
+| `severity.minimum_report` | `'Low'` | Minimum severity to include in reports |
+| `ctf.output_path` | `hack-auditor/ctf` | CTF output directory |
+| `report.output_path` | `hack-auditor/reports` | HTML report output directory |
+| `share.default_hashtags` | `['#LaravelSecurity', '#HackAuditor', '#CTF']` | Hashtags for sharing |
+| `share.ai_tweets` | `true` | AI-generated share text |
 | `usage.default_limit` | `0` | Default `--limit` value (0 = unlimited) |
+| `usage.cost_per_1m_input` | `3.00` | Cost per 1M input tokens |
+| `usage.cost_per_1m_output` | `15.00` | Cost per 1M output tokens |
 | `usage.show_usage` | `true` | Show token usage after scan |
 | `usage.log_enabled` | `true` | Auto-log usage to `storage/hack-auditor/usage.json` |
-| `ctf.output_path` | `hack-auditor/ctf` | CTF output directory |
 
 Zero database dependencies. All data stored as JSON files in `storage/hack-auditor/`.
 

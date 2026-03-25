@@ -7,7 +7,7 @@
     "authors": [
         {
             "name": "Mahdi Abazar Salmanzadeh",
-            "email": "mahdi@mindzone.ae"
+            "email": "mahdi@mindzone.tech"
         }
     ],
     "require": {
@@ -17,8 +17,8 @@
         "illuminate/console": "^12.0|^13.0"
     },
     "require-dev": {
-        "orchestra/testbench": "^8.0|^9.0|^10.0",
-        "pestphp/pest": "^2.0|^3.0|^4.0",
+        "orchestra/testbench": "^10.0",
+        "pestphp/pest": "^3.0|^4.0",
         "laravel/pint": "^1.0"
     },
     "autoload": {
