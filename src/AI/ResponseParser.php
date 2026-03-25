@@ -29,6 +29,7 @@ final class ResponseParser
 
         $vulnerabilities = $this->parseVulnerabilities($data['vulnerabilities']);
         $vulnerabilities = $this->filterSelfContradictions($vulnerabilities);
+        $vulnerabilities = $this->filterBrokenTaintTraces($vulnerabilities);
         $overallScore = $this->parseOverallScore($data['overall_score']);
         $summary = $this->parseStringField($data, 'summary');
         $ctfIdea = $this->parseOptionalStringField($data, 'ctf_idea');
@@ -300,6 +301,8 @@ final class ResponseParser
             );
         }
 
+        $taintTrace = $this->parseOptionalTaintTrace($item);
+
         return new Vulnerability(
             type: $type,
             location: $item['location'],
@@ -308,6 +311,7 @@ final class ResponseParser
             description: $item['description'],
             proof: $item['proof'],
             fix: $item['fix'],
+            taintTrace: $taintTrace,
         );
     }
 
@@ -610,6 +614,275 @@ final class ResponseParser
 
         foreach ($rescueRegexPatterns as $regex) {
             if (preg_match($regex, $lower)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Extract the optional taint_trace field from a vulnerability entry.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private function parseOptionalTaintTrace(array $item): ?string
+    {
+        if (! array_key_exists('taint_trace', $item) || $item['taint_trace'] === null) {
+            return null;
+        }
+
+        if (! is_string($item['taint_trace'])) {
+            return null;
+        }
+
+        $trace = trim($item['taint_trace']);
+
+        return $trace !== '' ? $trace : null;
+    }
+
+    /**
+     * Filter out findings whose taint trace reveals a non-exploitable data flow.
+     *
+     * For vulnerability types that require user-controlled input (SQL injection,
+     * XSS, open redirect, insecure deserialization), examines the taint_trace
+     * field to programmatically detect:
+     * - Sources that are not user-controlled (config, env, hardcoded, Auth::id)
+     * - Transforms that break the exploitation chain ((int) cast, htmlspecialchars, validated())
+     *
+     * Findings without a taint_trace or of non-input-dependent types pass through unchanged.
+     *
+     * @param  array<int, Vulnerability>  $vulnerabilities
+     * @return array<int, Vulnerability>
+     */
+    private function filterBrokenTaintTraces(array $vulnerabilities): array
+    {
+        return array_values(array_filter(
+            $vulnerabilities,
+            fn (Vulnerability $v): bool => ! $this->hasBrokenTaintTrace($v),
+        ));
+    }
+
+    /**
+     * Determine if a vulnerability's taint trace reveals a non-exploitable flow.
+     */
+    private function hasBrokenTaintTrace(Vulnerability $v): bool
+    {
+        if ($v->taintTrace === null) {
+            return false;
+        }
+
+        // Only apply taint analysis to input-dependent vulnerability types
+        $inputDependentTypes = [
+            VulnerabilityType::SqlInjection,
+            VulnerabilityType::Xss,
+            VulnerabilityType::OpenRedirect,
+            VulnerabilityType::InsecureDeserialization,
+        ];
+
+        if (! in_array($v->type, $inputDependentTypes, true)) {
+            return false;
+        }
+
+        $trace = strtolower($v->taintTrace);
+
+        if ($this->hasNonUserControlledSource($trace)) {
+            return true;
+        }
+
+        return $this->hasChainBreakingTransform($trace, $v->type);
+    }
+
+    /**
+     * Check if the taint trace SOURCE is non-user-controlled.
+     *
+     * Parses the SOURCE segment and checks for patterns indicating
+     * server-controlled or static data origins.
+     */
+    private function hasNonUserControlledSource(string $trace): bool
+    {
+        // Extract the SOURCE segment
+        if (! preg_match('/source:\s*(.+?)(?:\s*→|$)/i', $trace, $match)) {
+            return false;
+        }
+
+        $source = trim($match[1]);
+
+        // Non-user-controlled source patterns
+        $safeSourcePatterns = [
+            'config(',
+            'config::',
+            'env(',
+            'constant',
+            'hardcoded',
+            'static array',
+            'static string',
+            'auth::id()',
+            'auth::user()',
+            'auth()->id()',
+            'auth()->user()',
+            '$user->id',
+            'database value',
+            'admin-set',
+            'server-controlled',
+            'enum::',
+            'enum case',
+        ];
+
+        foreach ($safeSourcePatterns as $pattern) {
+            if (str_contains($source, $pattern)) {
+                return true;
+            }
+        }
+
+        // Regex patterns for config/env/constant sources
+        $safeSourceRegex = [
+            '/\bconfig\s*\(/',
+            '/\benv\s*\(/',
+            '/\b[A-Z_]{2,}(?:\s*constant|\s*enum)?\b/',
+            '/\bauth\s*(?:::|->|\(\s*\))/',
+        ];
+
+        foreach ($safeSourceRegex as $regex) {
+            if (preg_match($regex, $source)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if the taint trace TRANSFORMS break the exploitation chain.
+     *
+     * Examines the TRANSFORMS segment for sanitization or type-casting
+     * functions that neutralize the vulnerability type.
+     */
+    private function hasChainBreakingTransform(string $trace, VulnerabilityType $type): bool
+    {
+        // Extract the TRANSFORMS segment
+        if (! preg_match('/transforms:\s*(.+?)(?:\s*→|$)/i', $trace, $match)) {
+            return false;
+        }
+
+        $transforms = trim($match[1]);
+
+        if ($transforms === 'none' || $transforms === '') {
+            return false;
+        }
+
+        // Universal chain breakers — these kill any taint
+        $universalBreakers = [
+            'validated()',
+            '$request->validated()',
+            '->validated()',
+            '->safe()',
+            'safe()->only(',
+            'in_array(',
+            'in_array',
+            'allowlist',
+            'whitelist',
+        ];
+
+        foreach ($universalBreakers as $pattern) {
+            if (str_contains($transforms, $pattern)) {
+                return true;
+            }
+        }
+
+        // Type-specific chain breakers
+        return match ($type) {
+            VulnerabilityType::SqlInjection => $this->sqlInjectionChainBroken($transforms),
+            VulnerabilityType::Xss => $this->xssChainBroken($transforms),
+            VulnerabilityType::OpenRedirect => $this->openRedirectChainBroken($transforms),
+            VulnerabilityType::InsecureDeserialization => false,
+            default => false,
+        };
+    }
+
+    /**
+     * Check if a transform breaks SQL injection exploitation.
+     */
+    private function sqlInjectionChainBroken(string $transforms): bool
+    {
+        $breakers = [
+            '(int)',
+            '(float)',
+            '(bool)',
+            'intval(',
+            'intval',
+            'floatval(',
+            'floatval',
+            'abs(',
+            '(int) cast',
+            'integer cast',
+            'int cast',
+            'eloquent parameterization',
+            'parameter binding',
+            'prepared statement',
+        ];
+
+        foreach ($breakers as $pattern) {
+            if (str_contains($transforms, $pattern)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if a transform breaks XSS exploitation.
+     */
+    private function xssChainBroken(string $transforms): bool
+    {
+        $breakers = [
+            'htmlspecialchars(',
+            'htmlspecialchars',
+            'htmlentities(',
+            'htmlentities',
+            'e(',
+            'strip_tags(',
+            'strip_tags',
+            '{{ }}',
+            'blade {{ }}',
+            'blade escaping',
+            'escaped output',
+            '(int)',
+            '(float)',
+            '(bool)',
+            'intval(',
+            'intval',
+        ];
+
+        foreach ($breakers as $pattern) {
+            if (str_contains($transforms, $pattern)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if a transform breaks open redirect exploitation.
+     */
+    private function openRedirectChainBroken(string $transforms): bool
+    {
+        $breakers = [
+            'url validation',
+            'domain validation',
+            'domain allowlist',
+            'domain whitelist',
+            'parse_url(',
+            'parse_url',
+            'starts_with(',
+            'url::to(',
+            'route(',
+        ];
+
+        foreach ($breakers as $pattern) {
+            if (str_contains($transforms, $pattern)) {
                 return true;
             }
         }

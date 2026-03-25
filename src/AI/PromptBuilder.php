@@ -54,9 +54,12 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    - "SQL injection" when implode() is used with config() or hardcoded arrays — trace the source
    - "SQL injection" for LIKE/ilike wildcard injection (% and _ in search input) — Eloquent parameterizes the value, so % and _ are LIKE metacharacters only, NOT SQL injection. This is a LOW code-smell at most (user can broaden search results), never HIGH or SQL injection
    - "Mass assignment" when $fillable or $guarded is properly defined on the model
+   - "Mass assignment" when the controller uses $request->validated(), $request->safe(), $request->safe()->only([...]), or $request->only([...]) — these limit input to explicit fields, preventing mass assignment regardless of model configuration
    - "IDOR" when route model binding is used with ->scopeBindings() or when a Policy checks ownership
    - "IDOR" when a global scope (e.g., tenant scope) automatically filters queries
    - "IDOR" when middleware overwrites request parameters with server-controlled values (e.g., $request->merge(['user_id' => $authenticatedId]) in middleware means the controller reads server-set values, NOT user input)
+   - "IDOR" or "Missing authorization" when the controller uses $this->authorize(), $this->authorizeResource(), Gate::allows(), Gate::check(), Gate::authorize(), $this->can(), or policy() — these ARE authorization checks
+   - "IDOR" or "Missing authorization" when Gate::define() or Gate::before() is registered for the relevant ability in a service provider (check APPLICATION CONTEXT)
    - "Missing encryption" for fields that use 'encrypted' cast in the model
    - "Data exposure" for fields listed in the model's $hidden array
    - "Sensitive data in logs" for logging that only includes non-sensitive contextual data
@@ -126,6 +129,26 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    □ Would a senior Laravel developer agree this is a real vulnerability?
    If any check eliminates the finding, DO NOT REPORT IT.
 
+8. TAINT ANALYSIS PROTOCOL — MANDATORY FOR INPUT-DEPENDENT VULNERABILITIES:
+   For SqlInjection, Xss, OpenRedirect, InsecureDeserialization, and command injection findings,
+   you MUST trace the data flow and include a "taint_trace" field in the finding.
+
+   Format: "SOURCE: <where the data enters> → TRANSFORMS: <every function/cast/validation it passes through> → SINK: <where it's used dangerously>"
+
+   Examples:
+   - "SOURCE: $request->input('search') → TRANSFORMS: trim(), (string) cast → SINK: DB::raw('... ' . $search . ' ...')"
+   - "SOURCE: $request->query('url') → TRANSFORMS: none → SINK: redirect($url)"
+   - "SOURCE: config('app.allowed_columns') → TRANSFORMS: implode(',') → SINK: DB::raw('SELECT ' . $cols)"
+
+   CRITICAL: If you trace the source and discover it is NOT user-controlled (e.g., config(), env(),
+   hardcoded array, constant, enum, database value set by admin, Auth::id()), you MUST delete the
+   finding — do not emit it. The taint_trace exists to force you to verify the data flow. If the
+   chain is broken by a safe transform ((int) cast, intval(), htmlspecialchars(), e(), in_array()
+   allowlist, $request->validated(), Eloquent parameterization), DELETE the finding.
+
+   For other vulnerability types (MassAssignment, Idor, MissingRateLimit, AuthBypass, Csrf,
+   SensitiveDataExposure, WeakPasswordHashing, MissingValidation), taint_trace is optional.
+
 IMPORTANT: Your ENTIRE response must be a single JSON object. No text before it. No text after it. No markdown fences. No explanation. Just the JSON.
 
 {
@@ -137,7 +160,8 @@ IMPORTANT: Your ENTIRE response must be a single JSON object. No text before it.
             "severity": "Critical|High|Medium|Low",
             "description": "Clear description of the vulnerability, acknowledging security controls that ARE in place",
             "proof": "The exact vulnerable code snippet",
-            "fix": "The exact fixed code that replaces the vulnerable code"
+            "fix": "The exact fixed code that replaces the vulnerable code",
+            "taint_trace": "SOURCE: <origin> → TRANSFORMS: <transformations> → SINK: <dangerous usage> (REQUIRED for SqlInjection, Xss, OpenRedirect, InsecureDeserialization; optional otherwise)"
         }
     ],
     "overall_score": 0-100,
