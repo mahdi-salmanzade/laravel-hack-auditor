@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\AI;
 
 use Mahdi\HackAuditor\Scanner\AppContext;
+use Mahdi\HackAuditor\Scanner\Vulnerability;
 
 class PromptBuilder
 {
@@ -351,6 +352,82 @@ PROMPT;
         }
 
         return implode("\n", $sections)."\n";
+    }
+
+    /**
+     * Build the system prompt for multi-pass exploit verification.
+     *
+     * Asks the AI to act as a penetration tester who must either produce a
+     * concrete, working exploit or definitively state no exploit is possible.
+     * Theoretical or hedging answers are explicitly forbidden.
+     */
+    public function verificationSystemPrompt(): string
+    {
+        return <<<'PROMPT'
+You are a penetration tester verifying a static-analysis finding. Your job is to either:
+(a) construct a concrete, working exploit demonstrating the vulnerability, or
+(b) definitively state that no exploit is possible given the full code context.
+
+Do not hedge. Do not produce "theoretical" exploits. If you cannot write a specific HTTP request, SQL payload, input string, or command that triggers the vulnerability, you MUST respond with verified=false.
+
+The file contents are provided so you can see mitigations the first-pass analyzer may have missed (middleware, validation, authorization, encoding, parameterization, scopes, allowlists). Inspect them carefully before committing to a verdict.
+
+Your ENTIRE response MUST be a single JSON object. No prose, no markdown fences, no text outside the JSON.
+
+{
+    "verified": true | false,
+    "exploit": "<a concrete payload, HTTP request, or input string — REQUIRED when verified=true; use empty string when verified=false>",
+    "reasoning": "<why this exploit works, or why it cannot be exploited given the code context>"
+}
+
+Rules:
+- If verified=true, "exploit" MUST be a substantive payload a human could copy and run. Placeholders like "N/A", "<payload>", "TBD", or empty strings are NOT acceptable and mean verified=false.
+- If verified=false, explain in "reasoning" which specific code element prevents exploitation (e.g., "line 42 calls $request->validated() which enforces an allowlist").
+- Do not invent code paths. Base your verdict strictly on the file contents provided.
+PROMPT;
+    }
+
+    /**
+     * Build the user prompt for exploit verification of a specific finding.
+     *
+     * Packages the original finding (type, location, line, description, proof,
+     * taint trace) alongside the full source file so the model can attempt a
+     * concrete exploit or cite a mitigation that invalidates the finding.
+     */
+    public function buildVerificationPrompt(Vulnerability $vuln, string $fileContents): string
+    {
+        $taintLine = $vuln->taintTrace !== null
+            ? "Taint trace: {$vuln->taintTrace}\n"
+            : '';
+
+        return <<<PROMPT
+A first-pass static analyzer reported the following finding. Verify whether it is concretely exploitable.
+
+## Finding
+
+Type: {$vuln->type->value} ({$vuln->type->label()})
+Severity (pass 1): {$vuln->severity->value}
+Location: {$vuln->location}:{$vuln->line}
+
+Description:
+{$vuln->description}
+
+Proof (excerpt the analyzer flagged):
+{$vuln->proof}
+
+{$taintLine}
+## Full File Contents
+
+```php
+{$fileContents}
+```
+
+## Your Task
+
+Attempt to construct a concrete, working exploit against the finding above. If you can, return verified=true with the exact exploit payload. If you cannot — because the code has a mitigation the first pass missed, because the source is not user-controlled, or because the dangerous sink is unreachable — return verified=false with a specific reason.
+
+Respond with ONLY the JSON object. No markdown fences, no explanation, no text before or after.
+PROMPT;
     }
 
     /**

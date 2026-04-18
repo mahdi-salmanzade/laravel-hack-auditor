@@ -12,6 +12,12 @@ final class UsageTracker
 
     private int $requests = 0;
 
+    private int $verificationPromptTokens = 0;
+
+    private int $verificationCompletionTokens = 0;
+
+    private int $verificationRequests = 0;
+
     private float $startTime;
 
     private int $tokenLimit;
@@ -72,6 +78,43 @@ final class UsageTracker
     }
 
     /**
+     * Record usage from a verification-pass AI response.
+     *
+     * Tokens are tracked in a separate bucket so pass-1 and verification
+     * costs can be distinguished in reports.
+     */
+    public function recordVerification(int $promptTokens, int $completionTokens): void
+    {
+        $this->verificationPromptTokens += $promptTokens;
+        $this->verificationCompletionTokens += $completionTokens;
+        $this->verificationRequests++;
+    }
+
+    /**
+     * Get the verification-pass prompt (input) tokens.
+     */
+    public function getVerificationPromptTokens(): int
+    {
+        return $this->verificationPromptTokens;
+    }
+
+    /**
+     * Get the verification-pass completion (output) tokens.
+     */
+    public function getVerificationCompletionTokens(): int
+    {
+        return $this->verificationCompletionTokens;
+    }
+
+    /**
+     * Get the number of verification-pass AI requests made.
+     */
+    public function getVerificationRequests(): int
+    {
+        return $this->verificationRequests;
+    }
+
+    /**
      * Check if we can afford another request of the estimated size.
      */
     public function canAfford(int $estimatedTokens): bool
@@ -100,11 +143,14 @@ final class UsageTracker
     }
 
     /**
-     * Get the combined total of prompt and completion tokens used.
+     * Get the combined total of prompt and completion tokens used (pass-1 + verification).
      */
     public function totalTokens(): int
     {
-        return $this->promptTokens + $this->completionTokens;
+        return $this->promptTokens
+            + $this->completionTokens
+            + $this->verificationPromptTokens
+            + $this->verificationCompletionTokens;
     }
 
     /**
@@ -177,11 +223,17 @@ final class UsageTracker
 
     /**
      * Estimate the USD cost based on recorded token counts and configured rates.
+     *
+     * Sums pass-1 and verification buckets so the displayed cost reflects
+     * the full scan regardless of whether --verify was used.
      */
     public function estimateCost(): float
     {
-        $inputCost = ($this->promptTokens / 1_000_000) * $this->inputCostPer1M;
-        $outputCost = ($this->completionTokens / 1_000_000) * $this->outputCostPer1M;
+        $inputTokens = $this->promptTokens + $this->verificationPromptTokens;
+        $outputTokens = $this->completionTokens + $this->verificationCompletionTokens;
+
+        $inputCost = ($inputTokens / 1_000_000) * $this->inputCostPer1M;
+        $outputCost = ($outputTokens / 1_000_000) * $this->outputCostPer1M;
 
         return round($inputCost + $outputCost, 4);
     }
@@ -214,6 +266,9 @@ final class UsageTracker
         $this->promptTokens = 0;
         $this->completionTokens = 0;
         $this->requests = 0;
+        $this->verificationPromptTokens = 0;
+        $this->verificationCompletionTokens = 0;
+        $this->verificationRequests = 0;
         $this->startTime = microtime(true);
     }
 }

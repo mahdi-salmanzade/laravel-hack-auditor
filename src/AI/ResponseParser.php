@@ -43,6 +43,92 @@ final class ResponseParser
     }
 
     /**
+     * Parse an AI response for an exploit-verification request.
+     *
+     * Reuses the same 3-tier JSON extraction strategy as parse() (direct decode,
+     * code-fence extraction, string-aware brace counting). Throws when the
+     * response cannot be decoded or the required fields are missing — the
+     * VerificationEngine catches this and treats it as a technical failure
+     * (returning the original finding unchanged, not downgraded).
+     *
+     * Guard: when the model sets verified=true but the exploit string is
+     * empty, whitespace-only, or a placeholder ("N/A", "TBD", "<...>"), the
+     * result is normalized to verified=false — the model must provide
+     * substance to keep the finding at its current severity.
+     *
+     * @return array{verified: bool, exploit: ?string, reasoning: string}
+     *
+     * @throws InvalidAIResponseException
+     */
+    public function parseVerification(string $raw): array
+    {
+        $data = $this->decodeJson($raw);
+
+        if (! array_key_exists('verified', $data)) {
+            throw InvalidAIResponseException::missingField('verified');
+        }
+
+        $verified = (bool) $data['verified'];
+        $reasoning = is_string($data['reasoning'] ?? null) ? $data['reasoning'] : '';
+        $exploitRaw = is_string($data['exploit'] ?? null) ? trim($data['exploit']) : '';
+
+        if ($verified && ! $this->isSubstantiveExploit($exploitRaw)) {
+            return [
+                'verified' => false,
+                'exploit' => null,
+                'reasoning' => $reasoning !== ''
+                    ? $reasoning
+                    : 'Model claimed verified=true but provided no substantive exploit payload.',
+            ];
+        }
+
+        return [
+            'verified' => $verified,
+            'exploit' => $verified ? $exploitRaw : null,
+            'reasoning' => $reasoning,
+        ];
+    }
+
+    /**
+     * Determine if an exploit string contains substance or is a placeholder.
+     *
+     * Rejects empty strings, whitespace, and common placeholder tokens
+     * ("N/A", "TBD", "<payload>", etc.). The model must provide a payload
+     * a human could copy and run.
+     */
+    private function isSubstantiveExploit(string $exploit): bool
+    {
+        if ($exploit === '') {
+            return false;
+        }
+
+        $normalized = strtolower($exploit);
+
+        $placeholders = [
+            'n/a',
+            'none',
+            'tbd',
+            'todo',
+            'placeholder',
+            'not applicable',
+            'no exploit',
+            'no payload',
+        ];
+
+        foreach ($placeholders as $placeholder) {
+            if ($normalized === $placeholder) {
+                return false;
+            }
+        }
+
+        if (preg_match('/^<[^>]+>$/', $exploit) === 1) {
+            return false;
+        }
+
+        return strlen($exploit) >= 3;
+    }
+
+    /**
      * Decode the JSON response, trying direct decode first, then extracting from code fences.
      *
      * @return array<string, mixed>

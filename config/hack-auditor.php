@@ -237,4 +237,28 @@ return [
         'log_enabled' => true,
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Multi-Pass Exploit Verification
+    |--------------------------------------------------------------------------
+    |
+    | When enabled (or when --verify is passed to hack:scan), each HIGH or
+    | CRITICAL finding from the first pass is sent back to the AI with a
+    | request to construct a concrete exploit. Findings where the model
+    | cannot produce a working exploit are downgraded one severity tier
+    | (Critical→High, High→Medium). Findings with a concrete exploit keep
+    | their severity and gain an exploit_proof field.
+    |
+    | Cost note: verification roughly doubles API spend on scans with many
+    | HIGH+ findings. Leave disabled by default; enable when FP rate matters
+    | more than throughput.
+    |
+    */
+
+    'verification' => [
+        'enabled' => env('HACK_AUDITOR_VERIFY', false),
+        'min_severity' => 'High',
+        'downgrade_on_failure' => true,
+    ],
+
 ];

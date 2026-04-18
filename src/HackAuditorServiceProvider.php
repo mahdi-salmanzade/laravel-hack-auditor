@@ -25,6 +25,7 @@ use Mahdi\HackAuditor\Scanner\FileCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
 use Mahdi\HackAuditor\Scanner\RouteAnalyzer;
 use Mahdi\HackAuditor\Scanner\RuntimeIntrospector;
+use Mahdi\HackAuditor\Scanner\VerificationEngine;
 
 final class HackAuditorServiceProvider extends ServiceProvider
 {
@@ -49,6 +50,14 @@ final class HackAuditorServiceProvider extends ServiceProvider
         $this->app->singleton(ResponseParser::class);
         $this->app->singleton(AIAdapter::class);
 
+        $this->app->singleton(VerificationEngine::class, function ($app): VerificationEngine {
+            return new VerificationEngine(
+                ai: $app->make(AIAdapter::class),
+                prompts: $app->make(PromptBuilder::class),
+                parser: $app->make(ResponseParser::class),
+            );
+        });
+
         $this->app->singleton(HackScanner::class, function ($app): HackScanner {
             return new HackScanner(
                 fileCollector: $app->make(FileCollector::class),
@@ -59,6 +68,7 @@ final class HackAuditorServiceProvider extends ServiceProvider
                 routeAnalyzer: $app->make(RouteAnalyzer::class),
                 runtimeIntrospector: $app->make(RuntimeIntrospector::class),
                 contextCollector: $app->make(ContextCollector::class),
+                verificationEngine: $app->make(VerificationEngine::class),
             );
         });
 

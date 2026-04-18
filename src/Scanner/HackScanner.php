@@ -9,6 +9,7 @@ use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Contracts\ScannerInterface;
+use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\UsageTracker;
 use SplFileInfo;
 
@@ -26,6 +27,7 @@ final class HackScanner implements ScannerInterface
         private readonly ?RouteAnalyzer $routeAnalyzer = null,
         private readonly ?RuntimeIntrospector $runtimeIntrospector = null,
         private readonly ?ContextCollector $contextCollector = null,
+        private readonly ?VerificationEngine $verificationEngine = null,
     ) {}
 
     private ?AppContext $appContext = null;
@@ -35,6 +37,22 @@ final class HackScanner implements ScannerInterface
     private int $filesSkipped = 0;
 
     private int $chunksFailedParse = 0;
+
+    private bool $verify = false;
+
+    /**
+     * Enable or disable multi-pass exploit verification for HIGH+ findings.
+     *
+     * When enabled, each High/Critical finding from pass 1 is sent back to
+     * the AI with a request to produce a concrete exploit. Findings that
+     * cannot be exploited are downgraded one severity tier.
+     */
+    public function setVerify(bool $verify): self
+    {
+        $this->verify = $verify;
+
+        return $this;
+    }
 
     /**
      * Set the usage tracker for token consumption monitoring.
@@ -124,6 +142,8 @@ final class HackScanner implements ScannerInterface
             );
         }
 
+        $report = $this->maybeVerify($report);
+
         if ($this->usageTracker !== null) {
             $report->setUsageTracker($this->usageTracker);
         }
@@ -156,6 +176,8 @@ final class HackScanner implements ScannerInterface
                 ctfIdea: '',
             );
         }
+
+        $report = $this->maybeVerify($report, inlineCode: $code);
 
         if ($this->usageTracker !== null) {
             $report->setUsageTracker($this->usageTracker);
@@ -198,6 +220,7 @@ final class HackScanner implements ScannerInterface
         }
 
         $report = $this->mergeReports($reports);
+        $report = $this->maybeVerify($report);
 
         if ($this->usageTracker !== null) {
             $report->setUsageTracker($this->usageTracker);
@@ -733,6 +756,114 @@ final class HackScanner implements ScannerInterface
         }
 
         return $namespace !== null ? "{$namespace}\\{$class}" : $class;
+    }
+
+    /**
+     * Run exploit verification over HIGH+ findings when --verify is active.
+     *
+     * For each High/Critical finding, loads the source file and asks the AI
+     * to construct a working exploit. Findings with a concrete exploit retain
+     * their severity (with exploit_verified=true); findings the model cannot
+     * exploit are downgraded one tier (Critical→High, High→Medium) with
+     * original_severity preserved for audit trail.
+     *
+     * Score is adjusted by the weight delta of each downgrade so reports
+     * reflect the reduced exposure. Returns a new VulnerabilityReport.
+     */
+    private function maybeVerify(VulnerabilityReport $report, ?string $inlineCode = null): VulnerabilityReport
+    {
+        if (! $this->verify || $this->verificationEngine === null) {
+            return $report;
+        }
+
+        if ($this->usageTracker === null) {
+            $this->usageTracker = new UsageTracker;
+        }
+
+        $verified = [];
+        $verifiedCount = 0;
+        $downgradedCount = 0;
+        $scoreImprovement = 0;
+        $fileCache = [];
+
+        foreach ($report->vulnerabilities as $vuln) {
+            if (! $this->isVerifiable($vuln)) {
+                $verified[] = $vuln;
+
+                continue;
+            }
+
+            $contents = $this->loadFileForVerification($vuln->location, $fileCache, $inlineCode);
+
+            if ($contents === null) {
+                $verified[] = $vuln;
+
+                continue;
+            }
+
+            $updated = $this->verificationEngine->verify($vuln, $contents, $this->usageTracker);
+            $verified[] = $updated;
+
+            if ($updated->exploitVerified === true) {
+                $verifiedCount++;
+            } elseif ($updated->exploitVerified === false && $updated->originalSeverity !== null) {
+                $downgradedCount++;
+                $scoreImprovement += $updated->originalSeverity->weight() - $updated->severity->weight();
+            }
+        }
+
+        $newScore = min(100, $report->overallScore + $scoreImprovement);
+
+        return new VulnerabilityReport(
+            vulnerabilities: $verified,
+            overallScore: $newScore,
+            summary: $report->summary,
+            ctfIdea: $report->ctfIdea,
+            verificationAttempted: true,
+            verifiedCount: $verifiedCount,
+            downgradedCount: $downgradedCount,
+            verificationInputTokens: $this->usageTracker->getVerificationPromptTokens(),
+            verificationOutputTokens: $this->usageTracker->getVerificationCompletionTokens(),
+        );
+    }
+
+    /**
+     * Whether this finding is eligible for exploit verification.
+     */
+    private function isVerifiable(Vulnerability $vuln): bool
+    {
+        return $vuln->severity === SeverityLevel::Critical
+            || $vuln->severity === SeverityLevel::High;
+    }
+
+    /**
+     * Resolve and cache the source file for a vulnerability location.
+     *
+     * For inline scans (hack:scanCode), returns the original code regardless
+     * of location. For real files, resolves relative paths against base_path
+     * and caches reads to avoid re-reading a file for multiple findings.
+     */
+    private function loadFileForVerification(string $location, array &$cache, ?string $inlineCode): ?string
+    {
+        if ($inlineCode !== null) {
+            return $inlineCode;
+        }
+
+        if (array_key_exists($location, $cache)) {
+            return $cache[$location];
+        }
+
+        $absolute = str_starts_with($location, DIRECTORY_SEPARATOR)
+            ? $location
+            : base_path($location);
+
+        if (! is_file($absolute) || ! is_readable($absolute)) {
+            return $cache[$location] = null;
+        }
+
+        $contents = file_get_contents($absolute);
+
+        return $cache[$location] = $contents === false ? null : $contents;
     }
 
     /**

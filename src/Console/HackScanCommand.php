@@ -43,7 +43,8 @@ final class HackScanCommand extends Command
         {--baseline : Apply baseline to suppress known findings (on by default if file exists)}
         {--no-baseline : Ignore the baseline file}
         {--update-baseline : Save current findings as the new baseline}
-        {--limit= : Maximum token budget for this scan (stops scanning when reached)}';
+        {--limit= : Maximum token budget for this scan (stops scanning when reached)}
+        {--verify : Run multi-pass exploit verification on HIGH+ findings (doubles API cost on those findings)}';
 
     /**
      * The console command description.
@@ -88,6 +89,9 @@ final class HackScanCommand extends Command
         $tokenLimit = (int) ($this->option('limit') ?: config('hack-auditor.usage.default_limit', 0));
         $tracker = UsageTracker::forCurrentConfig($tokenLimit);
         $scanner->setUsageTracker($tracker);
+
+        $verifyEnabled = $this->option('verify') || (bool) config('hack-auditor.verification.enabled', false);
+        $scanner->setVerify($verifyEnabled);
 
         if (! $this->option('json') && $tracker->isLimitSet()) {
             $this->line('  <fg=gray>limit</>    '.number_format($tracker->getTokenLimit()).' tokens');
@@ -192,6 +196,8 @@ final class HackScanCommand extends Command
         }
 
         $this->displayScanComparison($report);
+
+        $this->displayVerificationSummary($report);
 
         $this->displayUsageSummary($report);
 
@@ -466,6 +472,14 @@ final class HackScanCommand extends Command
             $output['files_skipped'] = $report->getFilesSkipped();
         }
 
+        $output['verification'] = [
+            'attempted' => $report->verificationAttempted,
+            'verified' => $report->verifiedCount,
+            'downgraded' => $report->downgradedCount,
+            'input_tokens' => $report->verificationInputTokens,
+            'output_tokens' => $report->verificationOutputTokens,
+        ];
+
         $this->line((string) json_encode($output, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 
         return $report->hasCritical() ? self::FAILURE : self::SUCCESS;
@@ -697,6 +711,39 @@ final class HackScanCommand extends Command
             ]);
         } catch (\Throwable) {
             // Usage logging is best-effort
+        }
+    }
+
+    /**
+     * Display the multi-pass verification summary after a --verify run.
+     *
+     * Surfaces how many HIGH+ findings the AI confirmed with a concrete
+     * exploit, how many were downgraded, and the verification token spend
+     * so users can separate pass-1 from pass-2 cost.
+     */
+    private function displayVerificationSummary(VulnerabilityReport $report): void
+    {
+        if (! $report->verificationAttempted) {
+            return;
+        }
+
+        $totalHighPlus = $report->verifiedCount + $report->downgradedCount;
+        $this->newLine();
+        $this->line(sprintf(
+            '  <fg=magenta;options=bold>Verification</> %d/%d HIGH+ findings had working exploits <fg=gray>(%d downgraded)</>',
+            $report->verifiedCount,
+            $totalHighPlus,
+            $report->downgradedCount,
+        ));
+
+        $verificationTokens = $report->verificationInputTokens + $report->verificationOutputTokens;
+        if ($verificationTokens > 0) {
+            $this->line(sprintf(
+                '  <fg=gray>Verification tokens:</> %s input + %s output = <fg=white>%s total</>',
+                number_format($report->verificationInputTokens),
+                number_format($report->verificationOutputTokens),
+                number_format($verificationTokens),
+            ));
         }
     }
 
