@@ -261,6 +261,8 @@ class HtmlReportGenerator
         $description = $this->escape($vulnerability->description);
         $proof = $this->escape($vulnerability->proof);
         $fix = $this->escape($vulnerability->fix);
+        $verificationBadge = $this->buildVerificationBadge($vulnerability);
+        $exploitBlock = $this->buildExploitBlock($vulnerability);
 
         return <<<HTML
         <div class="finding-card severity-{$severityValue}" data-expanded="false">
@@ -268,6 +270,7 @@ class HtmlReportGenerator
             <div class="finding-row-top">
               <span class="severity-badge {$severityValue}">{$severityName}</span>
               <span class="finding-type">{$typeLabel}</span>
+              {$verificationBadge}
               <span class="toggle-icon">&#9654;</span>
             </div>
             <div class="finding-row-bottom">
@@ -277,6 +280,7 @@ class HtmlReportGenerator
           </div>
           <div class="finding-body">
             <p class="finding-description">{$description}</p>
+            {$exploitBlock}
             <div class="code-section">
               <div class="code-label vulnerable-label">Vulnerable Code</div>
               <div class="code-block vulnerable-code"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$proof}</code></pre></div>
@@ -286,6 +290,52 @@ class HtmlReportGenerator
               <div class="code-block fix-code"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$fix}</code></pre></div>
             </div>
           </div>
+        </div>
+        HTML;
+    }
+
+    /**
+     * Build the inline verification badge shown in the finding header.
+     *
+     * Returns a green check badge for findings with a confirmed exploit,
+     * a subtle downgrade badge (with original severity in the tooltip) for
+     * findings the model could not exploit, or an empty string when
+     * verification was not attempted.
+     */
+    private function buildVerificationBadge(Vulnerability $vulnerability): string
+    {
+        if ($vulnerability->exploitVerified === true) {
+            return '<span class="verification-badge verified" style="margin-left:8px;padding:2px 8px;border-radius:4px;font-size:11px;background:#16a34a;color:#fff;" title="Exploit verified by a second AI pass">&#10003; Verified</span>';
+        }
+
+        if ($vulnerability->exploitVerified === false && $vulnerability->originalSeverity !== null) {
+            $original = $this->escape(strtoupper($vulnerability->originalSeverity->name));
+            $tooltip = "Downgraded from {$original} — the model could not construct a working exploit";
+
+            return '<span class="verification-badge downgraded" style="margin-left:8px;padding:2px 8px;border-radius:4px;font-size:11px;background:#4b5563;color:#e5e7eb;" title="'.$this->escape($tooltip).'">&#9661; Downgraded from '.$original.'</span>';
+        }
+
+        return '';
+    }
+
+    /**
+     * Render the verified exploit payload inside the expanded card body.
+     *
+     * Treats the payload as untrusted (HTML-escaped, never interpreted).
+     * Returns an empty string when no exploit proof is attached.
+     */
+    private function buildExploitBlock(Vulnerability $vulnerability): string
+    {
+        if ($vulnerability->exploitVerified !== true || $vulnerability->exploitProof === null) {
+            return '';
+        }
+
+        $exploit = $this->escape($vulnerability->exploitProof);
+
+        return <<<HTML
+        <div class="code-section">
+          <div class="code-label vulnerable-label">Verified Exploit</div>
+          <div class="code-block vulnerable-code"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$exploit}</code></pre></div>
         </div>
         HTML;
     }

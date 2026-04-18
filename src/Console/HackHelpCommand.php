@@ -292,6 +292,20 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=gray>  Skip confirmation prompt for large codebases</>');
         $this->line('');
 
+        $this->line('  <fg=white;options=bold>VERIFICATION (v1.6)</>');
+        $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:scan --verify</>');
+        $this->line('  <fg=gray>  Run a second AI pass on each HIGH/CRITICAL finding that</>');
+        $this->line('  <fg=gray>  tries to construct a concrete exploit. Findings the model</>');
+        $this->line('  <fg=gray>  cannot exploit are downgraded one tier (Critical→High,</>');
+        $this->line('  <fg=gray>  High→Medium) with the original severity preserved for</>');
+        $this->line('  <fg=gray>  audit. Low/Medium findings are not re-verified.</>');
+        $this->line('');
+        $this->line('  <fg=gray>  Cost: roughly doubles API spend on HIGH+ findings.</>');
+        $this->line('  <fg=gray>  Enable by default via HACK_AUDITOR_VERIFY=true.</>');
+        $this->line('');
+
         $this->line('  <fg=white;options=bold>CI/CD & AUTOMATION</>');
         $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
         $this->line('');
