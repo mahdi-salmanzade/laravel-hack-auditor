@@ -53,6 +53,20 @@ On top of that, v1.4's context-aware scanning reads your actual Laravel architec
 
 Tested on production Laravel apps with 15-42 controllers and a deliberately vulnerable test app (100% true positive rate, 0 false positives).
 
+### Multi-pass verification (v1.6)
+
+Pass `--verify` to have the AI attempt a **concrete exploit** for every HIGH or CRITICAL finding. Findings the model can exploit retain their severity and ship with a copy-paste exploit payload (`exploit_proof`). Findings it cannot exploit are downgraded one tier (Critical→High, High→Medium) with the original severity preserved in `original_severity` for audit trail — a placeholder or hedging response is treated as no-exploit.
+
+```bash
+php artisan hack:scan --verify
+# → Verification 8/8 HIGH+ findings had working exploits (0 downgraded)
+#   Verification tokens: 15,288 input + 1,702 output = 16,990 total
+```
+
+> ⚠️ `--verify` approximately doubles API cost on scans with many HIGH+ findings. Recommended for pre-release audits, not every CI run. Enable by default via `HACK_AUDITOR_VERIFY=true`.
+
+Technical failures (AI timeouts, malformed responses) leave the finding untouched rather than downgrading on noise. The JSON output gains a `verification` sub-object with verified/downgraded counts and a separate token bucket so pass-1 and pass-2 cost are distinguishable.
+
 ### Token usage & cost tracking
 
 Every scan shows token consumption and estimated cost. Auto-detects your AI provider's pricing from a built-in registry of 30+ models (Anthropic, OpenAI, Gemini, xAI, Ollama). Budget your scans with `--limit`.

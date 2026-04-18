@@ -5,6 +5,33 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-04-18
+
+### Added
+
+- **Multi-pass exploit verification** — New `--verify` flag on `hack:scan` runs a second AI pass on each HIGH/CRITICAL finding, asking the model to construct a concrete, working exploit. Findings with a verified exploit retain their severity and gain an `exploit_proof` field. Findings where the model cannot produce a working exploit are downgraded one tier (Critical→High, High→Medium) with `original_severity` preserved for audit trail. Opt-in by default — enable via `--verify` or `HACK_AUDITOR_VERIFY=true`.
+- `Vulnerability` DTO fields: `exploit_verified` (bool|null), `exploit_proof` (string|null), `original_severity` (string|null).
+- `VulnerabilityReport` DTO fields: `verification_attempted`, `verified_count`, `downgraded_count`, `verification_input_tokens`, `verification_output_tokens`, emitted as a `verification` sub-object in JSON output.
+- `UsageTracker` now tracks verification tokens in a separate bucket (`recordVerification()`, `getVerificationPromptTokens()`, `getVerificationCompletionTokens()`, `getVerificationRequests()`). `estimateCost()` sums both buckets.
+- `VerificationEngine` class — new second-pass AI coordinator. Skips <High findings, absorbs AI/parse failures as no-ops (never downgrades on technical failure).
+- `PromptBuilder::verificationSystemPrompt()` + `PromptBuilder::buildVerificationPrompt(Vulnerability, string)` — pen-tester-style prompt rejecting theoretical or placeholder exploits.
+- `ResponseParser::parseVerification(string)` — same 3-tier JSON extraction as the main parser, with a placeholder guard that normalizes empty/`N/A`/`<payload>` responses to `verified=false`.
+- HTML report: inline "✓ Verified" (green) and "▽ Downgraded from X" (gray) badges on finding cards; verified exploit payload rendered in an HTML-escaped `<pre><code>` block.
+- `hack:help scan` documents the `--verify` flag, cost trade-off, and downgrade behavior.
+- 22 new tests (341 total, 891 assertions, 1.45s): 13 unit tests covering `VerificationEngine` skip/verify/downgrade/failure paths; 9 feature tests covering `--verify` CLI integration and JSON output contract.
+
+### Measured Impact
+
+- **vuln-lab** (curated, 8 known intentional vulns):
+  - Baseline: 11 findings, 0 FP, score **3/100**.
+  - Verified: 11 findings, **8 verified, 0 downgraded**, score **3/100**.
+  - All 7 HIGH+ intentional vulns pass 1 detected were verified with concrete exploits.
+- **Token cost on vuln-lab**: verification bucket = **1.33× pass-1 cost**. Total scan cost = **2.3× baseline** when `--verify` enabled. Cost scales with HIGH+ finding count, not file count.
+
+### Known Limitations
+
+- Pass-1 detection of command injection shows run-to-run variance on small surfaces. Verification can only annotate findings pass 1 produces — if pass 1 misses a vulnerability, `--verify` will not recover it. Not a regression from v1.5 logic (pass-1 code paths unchanged); tracked for future pass-1 prompt hardening.
+
 ## [1.2.0] - 2026-03-21
 
 ### Added
