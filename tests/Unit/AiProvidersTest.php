@@ -12,6 +12,30 @@ it('pricing returns correct rates for anthropic sonnet', function (): void {
         ->and($pricing['output'])->toBe(15.00);
 });
 
+it('pricing returns correct rates for anthropic opus 4.8 flagship', function (): void {
+    $pricing = AiProviders::pricing('anthropic', 'claude-opus-4-8');
+
+    expect($pricing)->not->toBeNull()
+        ->and($pricing['input'])->toBe(5.00)
+        ->and($pricing['output'])->toBe(25.00);
+});
+
+it('opus 4.8 is recognized as a known model', function (): void {
+    expect(AiProviders::isKnownModel('claude-opus-4-8'))->toBeTrue();
+});
+
+it('opus 4.8 dated alias fuzzy matches to flagship pricing', function (): void {
+    $pricing = AiProviders::pricing('anthropic', 'claude-opus-4-8-20260528');
+
+    expect($pricing)->not->toBeNull()
+        ->and($pricing['input'])->toBe(5.00)
+        ->and($pricing['output'])->toBe(25.00);
+});
+
+it('recommended for scanning returns opus 4.8 flagship for anthropic', function (): void {
+    expect(AiProviders::recommendedForScanning('anthropic'))->toBe('claude-opus-4-8');
+});
+
 it('pricing returns correct rates for openai gpt4o', function (): void {
     $pricing = AiProviders::pricing('openai', 'gpt-4o');
 

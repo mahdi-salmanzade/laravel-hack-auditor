@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Scanner;
 
 use Illuminate\Support\Collection;
+use Mahdi\HackAuditor\Support\SecretRedactor;
 use SplFileInfo;
 
 final class CodeExtractor
 {
+    public function __construct(private readonly SecretRedactor $redactor = new SecretRedactor) {}
+
     /**
      * Extract file contents and metadata for AI analysis.
      *
@@ -45,6 +48,7 @@ final class CodeExtractor
 
         $content = (string) file_get_contents($realPath);
         $cleanedContent = $this->cleanContent($content);
+        $cleanedContent = $this->redactSecrets($cleanedContent);
         $type = $this->detectType($content, $relativePath);
 
         return [
@@ -140,6 +144,21 @@ final class CodeExtractor
         }
 
         return 'other';
+    }
+
+    /**
+     * Redact hardcoded secret values from content before it is ever sent to a
+     * cloud AI provider. Replaces secret VALUES with detection-friendly markers
+     * so the AI can still flag the presence of a hardcoded secret without seeing
+     * its actual value. Controlled by the privacy.redact_secrets config flag.
+     */
+    private function redactSecrets(string $content): string
+    {
+        if (! config('hack-auditor.privacy.redact_secrets', true)) {
+            return $content;
+        }
+
+        return $this->redactor->redact($content);
     }
 
     /**

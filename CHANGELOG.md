@@ -5,6 +5,44 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-06-01
+
+This cycle adds four strategic differentiators — a deterministic Laravel access-control engine, an MCP server, a provable-accuracy benchmark, and a zero-egress privacy layer — plus a refreshed model registry and a fix for a silent determinism bug.
+
+### Measured Impact
+
+- **Measured accuracy on the labeled corpus: F1 ≈ 0.94** (precision ≈ 0.89, recall 1.00, 0 false negatives) via `hack:benchmark` — up from F1 0.71 before the SSRF/sensitive-data detectors and the dedup fix. A real, reproducible number, not a marketing claim.
+- **Test suite: 341 → 648 tests** (891 → 1583 assertions), all green. +307 tests across the new engines, the benchmark scorer, the MCP tools, and adversarially-found regression cases.
+- **Determinism restored** — `config('hack-auditor.ai.temperature')` and `ai.max_tokens` were silently dropped (laravel/ai resolves them only from class attributes via reflection, and the anonymous agent carried none), so every scan ran at provider default. They are now transmitted on every call — a precondition for the benchmark's reproducibility claim.
+- **Pricing registry refreshed to June 2026** — `claude-opus-4-8` (released 2026-05-28, $5/$25 per MTok) is now the Anthropic flagship returned by `recommendedForScanning()`, replacing the March-2026 `claude-opus-4-6` default.
+
+### Added
+
+- **Deterministic detection engine** (`src/Scanner/AccessControl/`) — framework-aware detectors that run alongside the AI pass and merge (with synonym-aware dedupe) into the report, giving reproducible coverage that doesn't depend on AI run-to-run variance: `SensitiveFillableDetector` (privilege/identity fields in `$fillable`), `UnauthorizedModelFetchDetector` (request- **and** route-param-sourced `find()`/`findOrFail()` exposed without an authorization or ownership guard), `PolicyRouteMismatchDetector` (a Policy exists for the model but is never applied), `SsrfDetector` (outbound `Http::`/`file_get_contents`/cURL calls with a user-controlled URL), and `SensitiveDataExposureDetector` (password/token/secret model fields returned in a response/JSON payload). Tuned for low false positives — benign columns (`status`/`type`/`level`/`tier`) are not flagged without a corroborating privilege signal, `$guarded = ['*']` models are skipped, and SSRF/exposure detectors require a user-controlled source or output context respectively.
+- **MCP server** (`src/Mcp/`, `routes/ai.php`) — exposes the scanner to AI coding agents (Claude Code, Cursor) via `php artisan mcp:start hack-auditor` with three tools: `scan_path`, `scan_diff`, `explain_finding`. Adds `laravel/mcp` as a dependency.
+- **`hack:benchmark` command + `src/Benchmark/`** — runs the scanner against a labeled in-repo corpus and reports precision / recall / F1 (overall + per-type), with `--min-f1` for CI gating and `--json` output. A self-contained, citable accuracy measurement and a regression gate for detection changes.
+- **Zero-egress privacy layer** — `SecretRedactor` strips secrets (AWS keys, bearer tokens, DSNs, PEM blocks, secret-keyword assignments incl. quoted/concatenated values) from code before it leaves the machine, replacing them with detection-preserving markers; gated by `privacy.redact_secrets` (default on). Documented fully-local scanning via `HACK_AUDITOR_AI_PROVIDER=ollama`.
+- **CWE ids on every `VulnerabilityType`** (`cweId()`) plus new types: `Ssrf`, `CommandInjection`, `DynamicColumnInjection`, `DebugModeExposure`, `CorsMisconfiguration`, `InsecureCookieConfig`, `UnverifiedWebhook`, `DependencyVulnerability`, each wired through `label()`/`description()`/`owaspCategory()`/`fromString()`.
+- **New flagship model entries** in `AiProviders`: `claude-opus-4-8` (+ dated alias) and `claude-opus-4-7` ($5/$25, 1M ctx); best-effort lineup bumps for OpenAI `gpt-5.5`, Gemini `gemini-3.5-flash`, xAI `grok-4.3`. A tokenizer note flags that Opus 4.7+ can consume ~35% more tokens.
+
+### Security
+
+- **Path-traversal / arbitrary-file-read fixed** in `HackScanner::scanFile()` — it resolved caller-supplied paths against `base_path()` and read them directly, bypassing the `scan.sensitive_patterns` guard. Reachable via the MCP `scan_path` tool, this allowed reading `.env`, `*.key`, `/etc/passwd`, or `../`-escapes and shipping them to the cloud AI. Now: `realpath`-confined to the app root, sensitive-pattern excluded, with defense-in-depth rejection of absolute/traversal paths in the MCP tool.
+- **Secret-redaction leaks closed** — values containing embedded quotes, string-concatenation chains, and short high-signal secrets (e.g. `password`) previously slipped past redaction; now redacted to the marker while ordinary code is left untouched.
+
+### Changed
+
+- **Hardened `ResponseParser::isSubstantiveExploit()`** — rejects bare URLs, lone tag placeholders, and refusal tokens; min substantive length 3 → 5. Real payloads still pass.
+- **Prompt guidance** to stop the model mislabeling an outbound HTTP fetch as `open_redirect`/`command_injection` (it's SSRF), and to assign a single primary type per location instead of double-labeling an IDOR as `sensitive_data_exposure`.
+
+### Fixed
+
+- **Duplicate-finding dedupe** now collapses the same vulnerability reported at nearby lines by different sources (e.g. the AI at the vulnerable statement, the deterministic detector at the method signature). The previous `floor(line/3)` bucket put adjacent lines on opposite sides of a boundary so duplicates survived; matching is now by line proximity and path-format-tolerant basename, applied across the whole AI-plus-deterministic list even when no deterministic finding fires. This raised benchmark precision from ≈0.73 to ≈0.89.
+
+### Tests
+
+- New suites for the access-control detectors (FP/FN cases, synonym dedupe), `SecretRedactor` (adversarial leak cases + false-positive guards), `BenchmarkRunner`/`GroundTruth` (scoring math, line tolerance, relative-path keying), the MCP tools (metadata, schemas, faked-scanner invocation, path-traversal refusal), `ScannerAgent` (temperature/max-tokens transmitted), and `VulnerabilityType` (CWE/OWASP/alias coverage). Plus the prior registry, exploit-guard, and HTML-escaping additions.
+
 ## [1.6.0] - 2026-04-18
 
 ### Added

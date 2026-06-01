@@ -6,12 +6,34 @@ namespace Mahdi\HackAuditor\Support;
 
 final class AiProviders
 {
-    // Pricing last verified: March 2026. Rates change — override via config if needed.
+    // Pricing last verified: June 2026. Rates change — override via config if needed.
     private const PROVIDERS = [
         'anthropic' => [
             'name' => 'Anthropic',
             'env_key' => 'ANTHROPIC_API_KEY',
             'models' => [
+                // NOTE: Opus 4.7+ use a new tokenizer that can consume up to ~35% more
+                // tokens for the same text than earlier Claude models. Chunking math is
+                // unchanged here — this is a heads-up for cost/context estimation only.
+                'claude-opus-4-8' => [
+                    'input' => 5.00,
+                    'output' => 25.00,
+                    'context' => 1_000_000,
+                    'tier' => 'flagship',
+                ],
+                'claude-opus-4-8-20260528' => [
+                    'input' => 5.00,
+                    'output' => 25.00,
+                    'context' => 1_000_000,
+                    'tier' => 'flagship',
+                    'alias_of' => 'claude-opus-4-8',
+                ],
+                'claude-opus-4-7' => [
+                    'input' => 5.00,
+                    'output' => 25.00,
+                    'context' => 1_000_000,
+                    'tier' => 'flagship',
+                ],
                 'claude-opus-4-6' => [
                     'input' => 5.00,
                     'output' => 25.00,
@@ -71,6 +93,12 @@ final class AiProviders
             'name' => 'OpenAI',
             'env_key' => 'OPENAI_API_KEY',
             'models' => [
+                'gpt-5.5' => [
+                    'input' => 5.00,
+                    'output' => 30.00,
+                    'context' => 400_000,
+                    'tier' => 'flagship',
+                ],
                 'gpt-4o' => [
                     'input' => 2.50,
                     'output' => 10.00,
@@ -126,6 +154,12 @@ final class AiProviders
             'name' => 'Google Gemini',
             'env_key' => 'GEMINI_API_KEY',
             'models' => [
+                'gemini-3.5-flash' => [
+                    'input' => 1.50,
+                    'output' => 9.00,
+                    'context' => 1_000_000,
+                    'tier' => 'flagship',
+                ],
                 'gemini-2.5-pro' => [
                     'input' => 1.25,
                     'output' => 10.00,
@@ -163,6 +197,12 @@ final class AiProviders
             'name' => 'xAI',
             'env_key' => 'XAI_API_KEY',
             'models' => [
+                'grok-4.3' => [
+                    'input' => 1.25,
+                    'output' => 2.50,
+                    'context' => 256_000,
+                    'tier' => 'flagship',
+                ],
                 'grok-3' => [
                     'input' => 3.00,
                     'output' => 15.00,

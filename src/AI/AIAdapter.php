@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\AI;
 
 use Illuminate\Support\Facades\Log;
-use Laravel\Ai\AnonymousAgent;
 use RuntimeException;
 
 class AIAdapter
@@ -116,11 +115,7 @@ class AIAdapter
             try {
                 $this->logRequest($systemPrompt, $userPrompt, $attempt);
 
-                $agent = new AnonymousAgent(
-                    instructions: $systemPrompt,
-                    messages: [],
-                    tools: [],
-                );
+                $agent = $this->buildAgent($systemPrompt);
 
                 $response = $agent->prompt(
                     prompt: $userPrompt,
@@ -167,17 +162,13 @@ class AIAdapter
     /**
      * Execute the AI request using the laravel/ai SDK.
      *
-     * Uses AnonymousAgent with the Promptable trait to send the system prompt
+     * Uses a ScannerAgent with the Promptable trait to send the system prompt
      * as agent instructions and the user prompt as the prompt message.
      * The response text is extracted from the AgentResponse.
      */
     private function executeRequest(string $systemPrompt, string $userPrompt): string
     {
-        $agent = new AnonymousAgent(
-            instructions: $systemPrompt,
-            messages: [],
-            tools: [],
-        );
+        $agent = $this->buildAgent($systemPrompt);
 
         $response = $agent->prompt(
             prompt: $userPrompt,
@@ -187,6 +178,23 @@ class AIAdapter
         );
 
         return $response->text;
+    }
+
+    /**
+     * Build a scan agent carrying the configured generation options.
+     *
+     * laravel/ai 0.3.x reads temperature and max tokens only from class-level
+     * attributes via reflection, so {@see ScannerAgent::for()} synthesises an
+     * agent whose attributes encode the configured values, ensuring they reach
+     * the provider on every request rather than falling back to its defaults.
+     */
+    private function buildAgent(string $systemPrompt): ScannerAgent
+    {
+        return ScannerAgent::for(
+            instructions: $systemPrompt,
+            temperature: $this->temperature,
+            maxTokens: $this->maxTokens,
+        );
     }
 
     /**

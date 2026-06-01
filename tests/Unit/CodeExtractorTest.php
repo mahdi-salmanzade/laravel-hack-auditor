@@ -243,6 +243,46 @@ it('returns empty content and other type for files with unresolvable path', func
         ->and($result['path'])->toBe('/fake/path.php');
 });
 
+it('redacts secrets in chunk content when privacy.redact_secrets is enabled', function (): void {
+    $this->app['config']->set('hack-auditor.privacy.redact_secrets', true);
+
+    $filePath = $this->tempDir.'/Secrets.php';
+    file_put_contents($filePath, <<<'PHP'
+    <?php
+
+    class Secrets
+    {
+        public string $key = 'AKIAIOSFODNN7EXAMPLE';
+    }
+    PHP);
+
+    $file = new SplFileInfo($filePath);
+    $result = $this->extractor->extract($file);
+
+    expect($result['content'])->toContain('__REDACTED_AWS_KEY__')
+        ->and($result['content'])->not->toContain('AKIAIOSFODNN7EXAMPLE');
+});
+
+it('leaves secrets untouched in chunk content when privacy.redact_secrets is disabled', function (): void {
+    $this->app['config']->set('hack-auditor.privacy.redact_secrets', false);
+
+    $filePath = $this->tempDir.'/Secrets.php';
+    file_put_contents($filePath, <<<'PHP'
+    <?php
+
+    class Secrets
+    {
+        public string $key = 'AKIAIOSFODNN7EXAMPLE';
+    }
+    PHP);
+
+    $file = new SplFileInfo($filePath);
+    $result = $this->extractor->extract($file);
+
+    expect($result['content'])->toContain('AKIAIOSFODNN7EXAMPLE')
+        ->and($result['content'])->not->toContain('__REDACTED_AWS_KEY__');
+});
+
 it('extracts the correct relative path for files under base_path', function (): void {
     $reflector = new ReflectionProperty($this->app, 'basePath');
     $reflector->setValue($this->app, $this->tempDir);

@@ -9,6 +9,8 @@ use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Contracts\ScannerInterface;
+use Mahdi\HackAuditor\Scanner\AccessControl\AccessControlAnalyzer;
+use Mahdi\HackAuditor\Scanner\AccessControl\AccessControlContext;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\UsageTracker;
 use SplFileInfo;
@@ -28,6 +30,7 @@ final class HackScanner implements ScannerInterface
         private readonly ?RuntimeIntrospector $runtimeIntrospector = null,
         private readonly ?ContextCollector $contextCollector = null,
         private readonly ?VerificationEngine $verificationEngine = null,
+        private readonly ?AccessControlAnalyzer $accessControlAnalyzer = null,
     ) {}
 
     private ?AppContext $appContext = null;
@@ -97,7 +100,16 @@ final class HackScanner implements ScannerInterface
         // Collect context once using all controller files from all chunks
         $this->collectAppContext($chunks);
 
-        return $this->scanChunks($chunks);
+        $report = $this->scanChunks($chunks);
+
+        $flatFiles = [];
+        foreach ($chunks as $chunk) {
+            foreach ($chunk as $file) {
+                $flatFiles[] = $file;
+            }
+        }
+
+        return $this->mergeAccessControlFindings($report, $flatFiles);
     }
 
     /**
@@ -116,6 +128,10 @@ final class HackScanner implements ScannerInterface
                 summary: "File not found: {$path}",
                 ctfIdea: '',
             );
+        }
+
+        if (($refusal = $this->guardScanPath($absolutePath, $path)) !== null) {
+            return $refusal;
         }
 
         $file = new SplFileInfo($absolutePath);
@@ -142,6 +158,8 @@ final class HackScanner implements ScannerInterface
             );
         }
 
+        $report = $this->mergeAccessControlFindings($report, [$extracted]);
+
         $report = $this->maybeVerify($report);
 
         if ($this->usageTracker !== null) {
@@ -149,6 +167,60 @@ final class HackScanner implements ScannerInterface
         }
 
         return $report;
+    }
+
+    /**
+     * Enforce path-safety guards before a single file is read and sent to the AI.
+     *
+     * This is the read-path counterpart to the FileCollector exclusion list.
+     * It (a) rejects any path that, once symlink/`..`-resolved, escapes the
+     * application's base_path, preventing arbitrary-file-read / traversal
+     * (e.g. `../../.env`, `/etc/passwd`); and (b) rejects any path matching the
+     * configured `scan.sensitive_patterns` globs (e.g. `.env*`, `*.key`,
+     * `*.pem`, `storage/logs/*`) so secrets are never exfiltrated to the
+     * cloud AI. Returns a refusal report when the path is unsafe, or null when
+     * the path is safe to scan.
+     */
+    private function guardScanPath(string $absolutePath, string $originalPath): ?VulnerabilityReport
+    {
+        $resolved = realpath($absolutePath);
+        $base = realpath(base_path());
+
+        if ($resolved === false || $base === false) {
+            return $this->refusedReport($originalPath, 'path could not be resolved');
+        }
+
+        $baseWithSeparator = rtrim($base, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+
+        if ($resolved !== $base && ! str_starts_with($resolved, $baseWithSeparator)) {
+            return $this->refusedReport($originalPath, 'path is outside the application root');
+        }
+
+        if ($this->fileCollector->matchesSensitivePattern($resolved)) {
+            return $this->refusedReport($originalPath, 'path matches a sensitive-file exclusion pattern');
+        }
+
+        return null;
+    }
+
+    /**
+     * Build a clean refusal report for a path that fails the safety guards.
+     *
+     * The file is never read, so no contents can leak into the AI prompt.
+     */
+    private function refusedReport(string $path, string $reason): VulnerabilityReport
+    {
+        Log::warning('[HackAuditor] Refused to scan path', [
+            'path' => $path,
+            'reason' => $reason,
+        ]);
+
+        return new VulnerabilityReport(
+            vulnerabilities: [],
+            overallScore: 100,
+            summary: "Refused to scan \"{$path}\": {$reason}.",
+            ctfIdea: '',
+        );
     }
 
     /**
@@ -176,6 +248,8 @@ final class HackScanner implements ScannerInterface
                 ctfIdea: '',
             );
         }
+
+        $report = $this->mergeAccessControlFindings($report, [$fileData]);
 
         $report = $this->maybeVerify($report, inlineCode: $code);
 
@@ -864,6 +938,176 @@ final class HackScanner implements ScannerInterface
         $contents = file_get_contents($absolute);
 
         return $cache[$location] = $contents === false ? null : $contents;
+    }
+
+    /**
+     * Run the deterministic access-control analyzer over the scanned files and
+     * merge its findings into the AI report, de-duplicating overlaps.
+     *
+     * This is default-on and provider-independent. New findings are appended
+     * (after dedupe at file+line+type) and the overall score is reduced by the
+     * combined severity weight of any newly-added findings so the report
+     * reflects the additional exposure. Never throws — analysis failures are
+     * logged and the original report is returned unchanged.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $files
+     */
+    private function mergeAccessControlFindings(VulnerabilityReport $report, array $files): VulnerabilityReport
+    {
+        $analyzer = $this->accessControlAnalyzer ?? new AccessControlAnalyzer;
+
+        try {
+            $context = $this->buildAccessControlContext($files);
+            $deterministic = $analyzer->analyze($files, $context);
+        } catch (\Throwable $e) {
+            Log::warning('[HackAuditor] Access-control analysis failed', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return $report;
+        }
+
+        // Always reconcile the AI findings against the deterministic findings.
+        // merge() de-dupes across the WHOLE combined list, so even when the
+        // deterministic analyzer finds nothing this still collapses duplicate AI
+        // findings (same file+line+type) the model emitted for a single issue.
+        $merged = $analyzer->merge($report->vulnerabilities, $deterministic);
+
+        // If nothing was appended and nothing collapsed, the report is unchanged.
+        if ($merged === $report->vulnerabilities) {
+            return $report;
+        }
+
+        // Genuinely-new findings (not in the original AI list by identity) are the
+        // deterministic findings that were not collapsed into an existing one;
+        // penalise the score by their combined severity weight. Collapsing a
+        // duplicate AI finding carries no penalty.
+        $newFindings = array_filter(
+            $merged,
+            static fn (Vulnerability $vulnerability): bool => ! in_array($vulnerability, $report->vulnerabilities, true),
+        );
+
+        $scorePenalty = 0;
+        foreach ($newFindings as $vulnerability) {
+            $scorePenalty += $vulnerability->severity->weight();
+        }
+
+        $newScore = max(0, $report->overallScore - $scorePenalty);
+
+        return new VulnerabilityReport(
+            vulnerabilities: $merged,
+            overallScore: $newScore,
+            summary: $report->summary,
+            ctfIdea: $report->ctfIdea,
+            verificationAttempted: $report->verificationAttempted,
+            verifiedCount: $report->verifiedCount,
+            downgradedCount: $report->downgradedCount,
+            verificationInputTokens: $report->verificationInputTokens,
+            verificationOutputTokens: $report->verificationOutputTokens,
+        );
+    }
+
+    /**
+     * Build the read-only context the access-control detectors consume.
+     *
+     * Routed-method metadata is sourced from the Laravel Router via
+     * RuntimeIntrospector (no DB), and Policy presence is detected by scanning
+     * the app/Policies directory on disk.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $files
+     */
+    private function buildAccessControlContext(array $files): AccessControlContext
+    {
+        $routedMethods = [];
+
+        if ($this->runtimeIntrospector !== null) {
+            foreach ($files as $file) {
+                if ($file['type'] !== 'controller') {
+                    continue;
+                }
+
+                $className = $this->extractClassName($file['content']);
+
+                if ($className === null) {
+                    continue;
+                }
+
+                try {
+                    $methods = $this->runtimeIntrospector->getRoutedMethods($className);
+                    $middlewareMap = $this->runtimeIntrospector->getRouteMiddleware($className);
+                } catch (\Throwable) {
+                    continue;
+                }
+
+                foreach ($methods as $method => $route) {
+                    $routedMethods["{$className}@{$method}"] = [
+                        'route' => $route,
+                        'middleware' => $this->matchMiddlewareForRoute($route, $middlewareMap),
+                    ];
+                }
+            }
+        }
+
+        return new AccessControlContext(
+            routedMethods: $routedMethods,
+            modelsWithPolicy: $this->collectModelsWithPolicy(),
+        );
+    }
+
+    /**
+     * Match the middleware stack for a routed method's route description.
+     *
+     * The routed-method route is like 'PUT /rooms/{room}'; the middleware map
+     * is keyed by 'PUT /rooms/{room}'. We align on the URI portion.
+     *
+     * @param  array<string, array<int, string>>  $middlewareMap
+     * @return array<int, string>
+     */
+    private function matchMiddlewareForRoute(string $route, array $middlewareMap): array
+    {
+        $uri = trim((string) strrchr(' '.$route, ' '));
+
+        foreach ($middlewareMap as $key => $middleware) {
+            if (str_ends_with($key, $uri) || str_contains($key, $uri)) {
+                return $middleware;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Collect the set of short model names that have a Policy class on disk.
+     *
+     * Uses convention (FooPolicy => Foo) without booting the database.
+     *
+     * @return array<int, string>
+     */
+    private function collectModelsWithPolicy(): array
+    {
+        $policiesPath = base_path('app/Policies');
+
+        if (! is_dir($policiesPath)) {
+            return [];
+        }
+
+        $files = glob($policiesPath.DIRECTORY_SEPARATOR.'*.php');
+
+        if ($files === false) {
+            return [];
+        }
+
+        $models = [];
+
+        foreach ($files as $file) {
+            $name = basename($file, '.php');
+
+            if (str_ends_with($name, 'Policy')) {
+                $models[] = substr($name, 0, -strlen('Policy'));
+            }
+        }
+
+        return array_values(array_unique($models));
     }
 
     /**

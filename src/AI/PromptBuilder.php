@@ -102,7 +102,7 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    - Test/debug endpoints with no environment check in production route files
    - SSRF: file_get_contents(), curl, Http::get() with user-controlled URLs without allowlist
    - IDOR where there is NO policy, NO scope, NO middleware, AND NO ownership check anywhere
-   - Open redirects: redirecting to user-controlled URLs without domain validation
+   - Open redirects: ONLY an actual redirect whose destination is user-controlled (redirect($input), Redirect::to($input), redirect()->away($input), header('Location: '.$input)) without domain validation. An OUTBOUND HTTP fetch (Http::get($url), curl, file_get_contents($url)) is SSRF — NOT an open redirect and NOT command injection. Only exec()/shell_exec()/system()/proc_open()/Process with user input is command injection; never label an HTTP fetch as open_redirect or command_injection
    - Mass assignment via Model::create($request->all()) when $fillable/$guarded is too permissive
    - Logging of passwords, tokens, OTP codes, API keys, credit card numbers
    - Broken authentication: custom auth logic bypassing Laravel's auth with exploitable flaws
@@ -118,7 +118,11 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    - DO NOT inflate severity. If you find yourself writing "if X changes in the future" or "if the logic is ever modified" — that is LOW at most, not HIGH. Flag what IS exploitable now, not hypothetical future risks.
    - Code patterns that are ugly but safe (e.g., string concat with (int) cast, config values in raw SQL) should be LOW code-smell suggestions at most. If you cannot construct a concrete exploit, it is not HIGH.
 
-7. FALSE POSITIVE PREVENTION — BEFORE EACH FINDING ASK:
+7. ONE PRIMARY TYPE PER LOCATION:
+   - Assign the single most-specific vulnerability type to each vulnerable location. Do NOT emit two overlapping findings for the same statement.
+   - If a location is fundamentally broken access control / IDOR (an unauthorized fetch that returns an object), report it as idor/auth_bypass — do NOT ALSO emit a separate sensitive_data_exposure finding for that same returned object at the same place. Only flag sensitive_data_exposure when specific secret fields (password, token, secret, api key) are placed into output independently of an access-control finding at that line.
+
+8. FALSE POSITIVE PREVENTION — BEFORE EACH FINDING ASK:
    □ Did I check if middleware handles this at the route level?
    □ Did I check if a FormRequest handles validation/authorization?
    □ Did I check if a Policy exists for this model?
@@ -130,8 +134,8 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    □ Would a senior Laravel developer agree this is a real vulnerability?
    If any check eliminates the finding, DO NOT REPORT IT.
 
-8. TAINT ANALYSIS PROTOCOL — MANDATORY FOR INPUT-DEPENDENT VULNERABILITIES:
-   For SqlInjection, Xss, OpenRedirect, InsecureDeserialization, and command injection findings,
+9. TAINT ANALYSIS PROTOCOL — MANDATORY FOR INPUT-DEPENDENT VULNERABILITIES:
+   For SqlInjection, Xss, OpenRedirect, InsecureDeserialization, and CommandInjection findings,
    you MUST trace the data flow and include a "taint_trace" field in the finding.
 
    Format: "SOURCE: <where the data enters> → TRANSFORMS: <every function/cast/validation it passes through> → SINK: <where it's used dangerously>"
@@ -147,6 +151,10 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    chain is broken by a safe transform ((int) cast, intval(), htmlspecialchars(), e(), in_array()
    allowlist, $request->validated(), Eloquent parameterization), DELETE the finding.
 
+   The CommandInjection sink is exec(), shell_exec(), system(), passthru(), or proc_open()
+   reached by unescaped user input. Use type "CommandInjection" for these — do NOT mislabel
+   OS command execution as InsecureDeserialization or MissingValidation.
+
    For other vulnerability types (MassAssignment, Idor, MissingRateLimit, AuthBypass, Csrf,
    SensitiveDataExposure, WeakPasswordHashing, MissingValidation), taint_trace is optional.
 
@@ -155,7 +163,7 @@ IMPORTANT: Your ENTIRE response must be a single JSON object. No text before it.
 {
     "vulnerabilities": [
         {
-            "type": "SqlInjection|Xss|Csrf|MassAssignment|Idor|MissingRateLimit|AuthBypass|InsecureDeserialization|OpenRedirect|SensitiveDataExposure|WeakPasswordHashing|MissingValidation",
+            "type": "SqlInjection|Xss|Csrf|MassAssignment|Idor|MissingRateLimit|AuthBypass|InsecureDeserialization|CommandInjection|OpenRedirect|SensitiveDataExposure|WeakPasswordHashing|MissingValidation",
             "location": "relative/path/to/File.php",
             "line": 42,
             "severity": "Critical|High|Medium|Low",

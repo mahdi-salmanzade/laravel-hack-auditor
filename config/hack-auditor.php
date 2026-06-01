@@ -42,6 +42,30 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Privacy & Zero-Egress Settings
+    |--------------------------------------------------------------------------
+    |
+    | Controls how source code is protected before it leaves your machine.
+    |
+    | When 'redact_secrets' is true (the default), hardcoded secret VALUES
+    | (AWS keys, bearer tokens, API keys, DB/Redis DSNs with credentials, PEM
+    | private keys, and .env-style secret assignments) are replaced with
+    | detection-friendly markers such as '__REDACTED_SECRET__' BEFORE the code
+    | is ever sent to a cloud AI provider. The AI can still flag that a
+    | hardcoded secret exists, but never sees the real value.
+    |
+    | For a fully local, zero-egress scan where NO code leaves your machine at
+    | all, set 'HACK_AUDITOR_AI_PROVIDER=ollama' (see the 'ai' section above)
+    | to route analysis through a locally hosted model.
+    |
+    */
+
+    'privacy' => [
+        'redact_secrets' => (bool) env('HACK_AUDITOR_REDACT_SECRETS', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Scan Settings
     |--------------------------------------------------------------------------
     |

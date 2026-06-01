@@ -116,6 +116,46 @@ final class FileCollector
     }
 
     /**
+     * Determine whether a path matches any configured sensitive pattern.
+     *
+     * Accepts either an absolute path (which is reduced to a path relative to
+     * base_path) or a path already relative to the application root. Matches
+     * the same `scan.sensitive_patterns` globs the Finder enforces during a
+     * directory scan (e.g. `.env*`, `*.key`, `*.pem`, `storage/logs/*`), so
+     * single-file entry points cannot bypass the exclusion list.
+     */
+    public function matchesSensitivePattern(string $path): bool
+    {
+        $basePath = base_path().DIRECTORY_SEPARATOR;
+
+        $relativePath = str_starts_with($path, $basePath)
+            ? substr($path, strlen($basePath))
+            : $path;
+
+        $relativePath = ltrim(str_replace('\\', '/', $relativePath), '/');
+        $basename = basename($relativePath);
+
+        foreach ($this->sensitivePatterns as $pattern) {
+            if (str_contains($pattern, '/')) {
+                $normalized = trim($pattern, '*/');
+
+                if ($relativePath === $normalized
+                    || str_starts_with($relativePath, $normalized.'/')
+                    || str_contains($relativePath, '/'.$normalized.'/')
+                    || str_contains('/'.$relativePath, '/'.$normalized.'/')
+                    || fnmatch($pattern, $relativePath)
+                ) {
+                    return true;
+                }
+            } elseif (fnmatch($pattern, $basename)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Apply file extension filters to the Finder instance.
      */
     private function applyExtensionFilters(Finder $finder): void

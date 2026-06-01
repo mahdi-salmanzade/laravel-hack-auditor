@@ -25,7 +25,7 @@ That's it. Two commands. Watch 12 vulnerabilities get ripped out of a controller
 
 ---
 
-## Six commands. That's the whole package.
+## The commands
 
 ```bash
 php artisan hack:demo                   # See it in action (no API key)
@@ -33,8 +33,10 @@ php artisan hack:scan                   # Scan YOUR app with AI
 php artisan hack:scan --diff --html     # Scan only changed files, export HTML report
 php artisan hack:ctf sql_injection      # Turn vulns into CTF challenges
 php artisan hack:report --latest        # Generate HTML report from saved scan
+php artisan hack:benchmark              # Measure accuracy (precision/recall/F1) on a labeled corpus
 php artisan hack:help                   # Full command reference
 php artisan hack:usage                  # Token usage & cost stats
+php artisan mcp:start hack-auditor      # Expose the scanner to AI agents (Claude Code, Cursor)
 ```
 
 **`hack:scan` finds what PHPStan and Snyk can't:**
@@ -43,7 +45,19 @@ php artisan hack:usage                  # Token usage & cost stats
 - "Login route has no throttle middleware" *(Brute-forceable)*
 - "Any authenticated user can set their own plan to 'pro' without payment" *(Auth bypass)*
 
-12 vulnerability types. OWASP Top 10 mapped. Every finding has file, line, explanation, and a copy-paste fix.
+20 vulnerability types. OWASP Top 10 mapped, each with a CWE id. Every finding has file, line, explanation, and a copy-paste fix.
+
+### Deterministic detection engine — not just the AI
+
+Alongside the AI pass, framework-aware detectors run on every scan and merge into the report, giving **reproducible** coverage that doesn't drift with AI run-to-run variance: IDOR / broken access control (policy-vs-route mismatch, `is_admin` in `$fillable`, unauthorized `find()`/`findOrFail()` exposure), **SSRF** (`Http::get()`/cURL with a user-controlled URL), and **sensitive-data exposure** (password/token/secret fields returned in a response). These are the OWASP-#1 access-control bugs generic SAST and generic AI both miss because they don't understand Laravel.
+
+### Measured accuracy — not a marketing claim
+
+`hack:benchmark` runs the scanner against a labeled corpus and reports precision / recall / F1, usable as a CI gate (`--min-f1`). Measured on the bundled corpus: **F1 ≈ 0.94, recall 1.00 (0 false negatives)**. The number is reproducible and ships in the repo — run it yourself.
+
+### Call it from your AI editor
+
+`mcp:start hack-auditor` exposes the scanner as MCP tools (`scan_path`, `scan_diff`, `explain_finding`) so Claude Code, Cursor, and other agents can run a real taint-aware Laravel audit mid-edit instead of guessing.
 
 ### Low false-positive rate
 

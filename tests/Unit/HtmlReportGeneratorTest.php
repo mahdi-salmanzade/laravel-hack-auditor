@@ -196,3 +196,22 @@ it('generates output with multiple vulnerabilities at different severities', fun
         ->and($html)->toContain('MEDIUM')
         ->and($html)->toContain('LOW');
 });
+
+it('html-escapes a vulnerability description containing a script tag', function (): void {
+    $report = new VulnerabilityReport(
+        vulnerabilities: [
+            makeReportVulnerability(
+                description: 'XSS demo: <script>alert("xss")</script> injected here.',
+            ),
+        ],
+        overallScore: 40,
+        summary: 'One finding.',
+        ctfIdea: '',
+    );
+
+    $generator = new HtmlReportGenerator;
+    $html = $generator->generate($report);
+
+    expect($html)->toContain('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;')
+        ->and($html)->not->toContain('<script>alert("xss")</script>');
+});

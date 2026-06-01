@@ -103,6 +103,33 @@ it('scans raw code with scanCode and returns a VulnerabilityReport', function ()
         ->and($report->vulnerabilities[0]->line)->toBe(42);
 });
 
+it('collapses near-duplicate AI findings of the same type at nearby lines even when no deterministic finding fires', function (): void {
+    $finding = static fn (int $line): array => [
+        'type' => 'sql_injection',
+        'location' => 'app/Http/Controllers/UserController.php',
+        'line' => $line,
+        'severity' => 'critical',
+        'description' => 'Raw SQL query with user input.',
+        'proof' => 'DB::select("SELECT * FROM users WHERE id = $id")',
+        'fix' => 'Use parameter bindings.',
+    ];
+
+    // The model reports the SAME issue twice at adjacent lines (42 and 44) — the
+    // exact shape of the real IdorController duplicate. They share a dedupe
+    // bucket, so the report must collapse them to one even though SQL injection
+    // triggers no deterministic detector.
+    $response = buildValidAIResponse(
+        vulnerabilities: [$finding(42), $finding(44)],
+        score: 25,
+    );
+
+    $report = createMockedScanner($response)
+        ->scanCode('<?php DB::select("SELECT * FROM users WHERE id = $id");');
+
+    expect($report->totalCount())->toBe(1)
+        ->and($report->vulnerabilities[0]->type)->toBe(VulnerabilityType::SqlInjection);
+});
+
 it('returns a report with file not found message for nonexistent scanFile path', function (): void {
     $response = buildValidAIResponse();
 
@@ -114,6 +141,135 @@ it('returns a report with file not found message for nonexistent scanFile path',
         ->and($report->overallScore)->toBe(100)
         ->and($report->totalCount())->toBe(0)
         ->and($report->summary)->toContain('File not found');
+});
+
+it('refuses to scan a .env file via scanFile', function (): void {
+    $envPath = base_path('.env');
+    $created = ! file_exists($envPath);
+
+    if ($created) {
+        file_put_contents($envPath, "APP_KEY=base64:supersecretkeyvalue\nDB_PASSWORD=hunter2\n");
+    }
+
+    $mockAdapter = Mockery::mock(AIAdapter::class);
+    $mockAdapter->shouldNotReceive('send');
+    $mockAdapter->shouldNotReceive('sendWithUsage');
+
+    $scanner = new HackScanner(
+        fileCollector: app(FileCollector::class),
+        codeExtractor: app(CodeExtractor::class),
+        promptBuilder: app(PromptBuilder::class),
+        responseParser: app(ResponseParser::class),
+        aiAdapter: $mockAdapter,
+    );
+
+    try {
+        $report = $scanner->scanFile('.env');
+    } finally {
+        if ($created) {
+            @unlink($envPath);
+        }
+    }
+
+    expect($report->totalCount())->toBe(0)
+        ->and($report->summary)->toContain('Refused to scan')
+        ->and($report->summary)->toContain('sensitive');
+});
+
+it('refuses to scan a *.key file via scanFile', function (): void {
+    $keyPath = base_path('storage/oauth-private.key');
+    @mkdir(dirname($keyPath), 0755, true);
+    file_put_contents($keyPath, "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----");
+
+    $mockAdapter = Mockery::mock(AIAdapter::class);
+    $mockAdapter->shouldNotReceive('send');
+    $mockAdapter->shouldNotReceive('sendWithUsage');
+
+    $scanner = new HackScanner(
+        fileCollector: app(FileCollector::class),
+        codeExtractor: app(CodeExtractor::class),
+        promptBuilder: app(PromptBuilder::class),
+        responseParser: app(ResponseParser::class),
+        aiAdapter: $mockAdapter,
+    );
+
+    try {
+        $report = $scanner->scanFile('storage/oauth-private.key');
+    } finally {
+        @unlink($keyPath);
+    }
+
+    expect($report->totalCount())->toBe(0)
+        ->and($report->summary)->toContain('Refused to scan')
+        ->and($report->summary)->toContain('sensitive');
+});
+
+it('refuses to scan an absolute path outside the application root', function (): void {
+    $mockAdapter = Mockery::mock(AIAdapter::class);
+    $mockAdapter->shouldNotReceive('send');
+    $mockAdapter->shouldNotReceive('sendWithUsage');
+
+    $scanner = new HackScanner(
+        fileCollector: app(FileCollector::class),
+        codeExtractor: app(CodeExtractor::class),
+        promptBuilder: app(PromptBuilder::class),
+        responseParser: app(ResponseParser::class),
+        aiAdapter: $mockAdapter,
+    );
+
+    $report = $scanner->scanFile('/etc/passwd');
+
+    expect($report->totalCount())->toBe(0)
+        ->and($report->summary)->toContain('Refused to scan')
+        ->and($report->summary)->toContain('outside the application root');
+});
+
+it('refuses to scan a traversal path that escapes the application root', function (): void {
+    $outside = dirname(base_path()).'/hack-auditor-traversal-secret.php';
+    file_put_contents($outside, '<?php $secret = "leaked";');
+
+    $mockAdapter = Mockery::mock(AIAdapter::class);
+    $mockAdapter->shouldNotReceive('send');
+    $mockAdapter->shouldNotReceive('sendWithUsage');
+
+    $scanner = new HackScanner(
+        fileCollector: app(FileCollector::class),
+        codeExtractor: app(CodeExtractor::class),
+        promptBuilder: app(PromptBuilder::class),
+        responseParser: app(ResponseParser::class),
+        aiAdapter: $mockAdapter,
+    );
+
+    try {
+        $report = $scanner->scanFile('../hack-auditor-traversal-secret.php');
+    } finally {
+        @unlink($outside);
+    }
+
+    expect($report->totalCount())->toBe(0)
+        ->and($report->summary)->toContain('Refused to scan')
+        ->and($report->summary)->toContain('outside the application root');
+});
+
+it('still scans a normal in-app controller path', function (): void {
+    $controllerDir = base_path('app/Http/Controllers');
+    @mkdir($controllerDir, 0755, true);
+    $controllerPath = $controllerDir.'/GuardTestController.php';
+    file_put_contents(
+        $controllerPath,
+        '<?php namespace App\Http\Controllers; class GuardTestController { public function show($id) { return $id; } }',
+    );
+
+    $scanner = createMockedScanner(buildSingleVulnerabilityResponse());
+
+    try {
+        $report = $scanner->scanFile('app/Http/Controllers/GuardTestController.php');
+    } finally {
+        @unlink($controllerPath);
+    }
+
+    expect($report->summary)->not->toContain('Refused to scan')
+        ->and($report->totalCount())->toBe(1);
 });
 
 it('merges multiple chunk results correctly', function (): void {

@@ -37,6 +37,44 @@ it('returns null for non-model class', function (): void {
     expect($result)->toBeNull();
 });
 
+it('degrades gracefully when no routes reference the controller', function (): void {
+    $introspector = new RuntimeIntrospector(app(Router::class));
+
+    $middleware = $introspector->getRouteMiddleware('App\\Http\\Controllers\\GhostController');
+    $methods = $introspector->getRoutedMethods('App\\Http\\Controllers\\GhostController');
+
+    expect($middleware)->toBeArray()->toBeEmpty()
+        ->and($methods)->toBeArray()->toBeEmpty();
+});
+
+it('resolves middleware for a routed controller without booting a database', function (): void {
+    $router = app(Router::class);
+
+    if (! class_exists('RuntimeIntrospectorRoutedController')) {
+        eval('
+            class RuntimeIntrospectorRoutedController
+            {
+                public function index() { return "ok"; }
+            }
+        ');
+    }
+
+    $router->middleware('web')->get(
+        '/runtime-introspector-test',
+        'RuntimeIntrospectorRoutedController@index',
+    );
+
+    $introspector = new RuntimeIntrospector($router);
+
+    $middleware = $introspector->getRouteMiddleware('RuntimeIntrospectorRoutedController');
+    $methods = $introspector->getRoutedMethods('RuntimeIntrospectorRoutedController');
+
+    expect($middleware)->toBeArray()
+        ->toHaveKey('GET /runtime-introspector-test')
+        ->and($middleware['GET /runtime-introspector-test'])->toContain('web')
+        ->and($methods)->toBe(['index' => 'GET /runtime-introspector-test']);
+});
+
 it('returns model info for a valid eloquent model', function (): void {
     // Define a test model class dynamically
     if (! class_exists('RuntimeIntrospectorTestModel')) {

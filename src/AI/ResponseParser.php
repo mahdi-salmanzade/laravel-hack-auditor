@@ -92,9 +92,10 @@ final class ResponseParser
     /**
      * Determine if an exploit string contains substance or is a placeholder.
      *
-     * Rejects empty strings, whitespace, and common placeholder tokens
-     * ("N/A", "TBD", "<payload>", etc.). The model must provide a payload
-     * a human could copy and run.
+     * Rejects empty strings, whitespace, common placeholder/refusal tokens
+     * ("N/A", "TBD", "not vulnerable", etc.), a bare URL (a link is not an
+     * exploit), and a lone HTML/XML tag template ("<payload>"). The model
+     * must provide a payload a human could copy and run.
      */
     private function isSubstantiveExploit(string $exploit): bool
     {
@@ -113,6 +114,11 @@ final class ResponseParser
             'not applicable',
             'no exploit',
             'no payload',
+            'not vulnerable',
+            'safe',
+            'patched',
+            'no vulnerability',
+            'cannot exploit',
         ];
 
         foreach ($placeholders as $placeholder) {
@@ -121,11 +127,15 @@ final class ResponseParser
             }
         }
 
+        if (preg_match('/^\s*https?:\/\/\S+\s*$/i', $exploit) === 1) {
+            return false;
+        }
+
         if (preg_match('/^<[^>]+>$/', $exploit) === 1) {
             return false;
         }
 
-        return strlen($exploit) >= 3;
+        return strlen($exploit) >= 5;
     }
 
     /**

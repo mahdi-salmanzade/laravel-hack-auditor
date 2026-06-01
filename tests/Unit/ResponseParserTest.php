@@ -505,3 +505,83 @@ it('handles JSON with newlines in string values', function (): void {
         ->and($report->vulnerabilities)->toHaveCount(1)
         ->and($report->vulnerabilities[0]->description)->toContain("\n");
 });
+
+describe('parseVerification substantive-exploit guard', function (): void {
+    it('rejects a bare URL as a non-substantive exploit', function (): void {
+        $json = json_encode([
+            'verified' => true,
+            'exploit' => 'https://example.com/admin?id=1',
+            'reasoning' => 'A link was provided.',
+        ], JSON_THROW_ON_ERROR);
+
+        $result = $this->parser->parseVerification($json);
+
+        expect($result['verified'])->toBeFalse()
+            ->and($result['exploit'])->toBeNull();
+    });
+
+    it('rejects a lone HTML tag placeholder', function (): void {
+        $json = json_encode([
+            'verified' => true,
+            'exploit' => '<payload>',
+            'reasoning' => '',
+        ], JSON_THROW_ON_ERROR);
+
+        $result = $this->parser->parseVerification($json);
+
+        expect($result['verified'])->toBeFalse()
+            ->and($result['exploit'])->toBeNull();
+    });
+
+    it('rejects a refusal token such as "not vulnerable"', function (): void {
+        $json = json_encode([
+            'verified' => true,
+            'exploit' => 'Not Vulnerable',
+            'reasoning' => '',
+        ], JSON_THROW_ON_ERROR);
+
+        $result = $this->parser->parseVerification($json);
+
+        expect($result['verified'])->toBeFalse()
+            ->and($result['exploit'])->toBeNull();
+    });
+
+    it('rejects an exploit shorter than the minimum substantive length', function (): void {
+        $json = json_encode([
+            'verified' => true,
+            'exploit' => 'a=1',
+            'reasoning' => '',
+        ], JSON_THROW_ON_ERROR);
+
+        $result = $this->parser->parseVerification($json);
+
+        expect($result['verified'])->toBeFalse()
+            ->and($result['exploit'])->toBeNull();
+    });
+
+    it('accepts a real SQL injection payload', function (): void {
+        $json = json_encode([
+            'verified' => true,
+            'exploit' => "' OR 1=1--",
+            'reasoning' => 'Auth bypass via tautology.',
+        ], JSON_THROW_ON_ERROR);
+
+        $result = $this->parser->parseVerification($json);
+
+        expect($result['verified'])->toBeTrue()
+            ->and($result['exploit'])->toBe("' OR 1=1--");
+    });
+
+    it('accepts a real XSS script payload that contains more than a bare tag', function (): void {
+        $json = json_encode([
+            'verified' => true,
+            'exploit' => '<script>alert(1)</script>',
+            'reasoning' => 'Reflected XSS.',
+        ], JSON_THROW_ON_ERROR);
+
+        $result = $this->parser->parseVerification($json);
+
+        expect($result['verified'])->toBeTrue()
+            ->and($result['exploit'])->toBe('<script>alert(1)</script>');
+    });
+});

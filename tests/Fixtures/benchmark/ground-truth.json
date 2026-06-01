@@ -1,0 +1,94 @@
+{
+    "description": "Labeled vulnerability corpus for the hack:benchmark accuracy gate. Each sample contains exactly one intentional vulnerability (or none, for clean samples). Lines refer to the 1-indexed location of the vulnerable statement. accepted_types lists TRUE synonyms of the canonical type — only types that name the SAME underlying flaw (e.g. dynamic_column_injection is a flavour of sql_injection; idor and auth_bypass are both broken access control). Broad stand-ins such as missing_validation are NOT accepted, since crediting them would inflate per-type recall. A credited true positive is always reported under the ground-truth (canonical) type, never the synonym the AI happened to emit.",
+    "line_tolerance": 3,
+    "samples": [
+        {
+            "file": "SqlInjectionController.php",
+            "expected": [
+                {
+                    "type": "sql_injection",
+                    "line": 16,
+                    "accepted_types": ["sql_injection", "dynamic_column_injection"]
+                }
+            ]
+        },
+        {
+            "file": "XssController.php",
+            "expected": [
+                {
+                    "type": "xss",
+                    "line": 15,
+                    "accepted_types": ["xss"]
+                }
+            ]
+        },
+        {
+            "file": "IdorController.php",
+            "expected": [
+                {
+                    "type": "idor",
+                    "line": 14,
+                    "accepted_types": ["idor", "auth_bypass"]
+                }
+            ]
+        },
+        {
+            "file": "CommandInjectionController.php",
+            "expected": [
+                {
+                    "type": "command_injection",
+                    "line": 15,
+                    "accepted_types": ["command_injection"]
+                }
+            ]
+        },
+        {
+            "file": "MassAssignmentModel.php",
+            "expected": [
+                {
+                    "type": "mass_assignment",
+                    "line": 11,
+                    "accepted_types": ["mass_assignment"]
+                }
+            ]
+        },
+        {
+            "file": "SsrfController.php",
+            "expected": [
+                {
+                    "type": "ssrf",
+                    "line": 16,
+                    "accepted_types": ["ssrf"]
+                }
+            ]
+        },
+        {
+            "file": "SensitiveDataController.php",
+            "expected": [
+                {
+                    "type": "sensitive_data_exposure",
+                    "line": 18,
+                    "accepted_types": ["sensitive_data_exposure"]
+                }
+            ]
+        },
+        {
+            "file": "BrokenAccessControlController.php",
+            "expected": [
+                {
+                    "type": "auth_bypass",
+                    "line": 16,
+                    "accepted_types": ["auth_bypass", "idor"]
+                }
+            ]
+        },
+        {
+            "file": "CleanController.php",
+            "expected": []
+        },
+        {
+            "file": "CleanModel.php",
+            "expected": []
+        }
+    ]
+}

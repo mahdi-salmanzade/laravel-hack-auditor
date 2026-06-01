@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor;
 
 use Illuminate\Support\ServiceProvider;
+use Laravel\Mcp\Facades\Mcp;
 use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
 use Mahdi\HackAuditor\AI\ResponseParser;
+use Mahdi\HackAuditor\Console\HackBenchmarkCommand;
 use Mahdi\HackAuditor\Console\HackCTFCommand;
 use Mahdi\HackAuditor\Console\HackDemoCommand;
 use Mahdi\HackAuditor\Console\HackHelpCommand;
@@ -100,6 +102,7 @@ final class HackAuditorServiceProvider extends ServiceProvider
                 HackReportCommand::class,
                 HackHelpCommand::class,
                 HackUsageCommand::class,
+                HackBenchmarkCommand::class,
             ]);
 
             $this->publishes([
@@ -109,6 +112,10 @@ final class HackAuditorServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../resources/stubs' => base_path('stubs/hack-auditor'),
             ], 'hack-auditor-stubs');
+
+            if (class_exists(Mcp::class)) {
+                $this->loadRoutesFrom(__DIR__.'/../routes/ai.php');
+            }
         }
     }
 }
