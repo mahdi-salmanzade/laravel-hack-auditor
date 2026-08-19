@@ -425,12 +425,13 @@ final class AiProviders
             }
         }
 
-        // 4. Fallback defaults (Anthropic Claude Sonnet)
+        // 4. Fallback defaults — mirrors defaultModel('anthropic'), the first
+        // non-alias 'balanced' entry in the registry.
         return [
             'input' => 3.00,
             'output' => 15.00,
             'provider' => 'anthropic',
-            'model' => 'claude-sonnet-4-6',
+            'model' => 'claude-sonnet-5',
             'source' => 'default',
         ];
     }

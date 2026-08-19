@@ -5,6 +5,12 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `detectPricing()`'s last-resort fallback now names `claude-sonnet-5` instead of `claude-sonnet-4-6`, matching what `defaultModel('anthropic')` returns. Same rate either way ($3/$15), so no estimate changes — this only removes a disagreement between the two code paths.
+
 ## [2.0.0] - 2026-08-19
 
 A dependency and model-registry refresh that fixes a shipped defect: since v1.7.0 the scanner has been unusable on Anthropic's current flagship models. Major only because the `laravel/ai` floor moves from `^0.3` to `^0.11`, which consuming apps must adopt. No scanner behaviour, output contract, or config key changes apart from the additive `cwe` field.
