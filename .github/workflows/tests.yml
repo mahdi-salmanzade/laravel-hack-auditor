@@ -59,8 +59,14 @@ jobs:
             composer update --prefer-dist --no-interaction --no-progress
           fi
 
+      # `composer show` takes at most "<package> <version>", so it cannot be
+      # given a list. Filter the full list instead, and never let this
+      # diagnostic fail the job.
       - name: Report resolved versions
-        run: composer show laravel/ai laravel/mcp laravel/framework pestphp/pest orchestra/testbench phpunit/phpunit
+        run: |
+          composer show \
+            | grep -E '^(laravel/(ai|mcp|framework)|orchestra/testbench|pestphp/pest|phpunit/phpunit) ' \
+            || true
 
       - name: Run tests
         run: vendor/bin/pest --compact
