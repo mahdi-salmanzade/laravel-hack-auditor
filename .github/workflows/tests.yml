@@ -1,0 +1,89 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }} · Laravel ${{ matrix.laravel }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The package declares `php ^8.3` and `illuminate/* ^12.41.1|^13.0`.
+          # Pest 5 requires PHP 8.4 and (via symfony/process ^8.1) cannot resolve
+          # against Laravel 12 at all, so the lower bound is exercised on its own
+          # leg with Pest 4 + Testbench 10. Without this leg the declared 8.3 and
+          # Laravel 12 support would ship untested — composer validates the live
+          # interpreter, not the declared floor, so nothing would warn us.
+          - php: '8.3'
+            laravel: '12'
+            constraint: 'laravel/framework:^12.67'
+          - php: '8.4'
+            laravel: '13'
+            constraint: ''
+          - php: '8.5'
+            laravel: '13'
+            constraint: ''
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: composer:v2
+
+      - name: Cache Composer packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.composer/cache/files
+          key: composer-${{ matrix.php }}-${{ matrix.laravel }}-${{ hashFiles('composer.json') }}
+          restore-keys: composer-${{ matrix.php }}-${{ matrix.laravel }}-
+
+      - name: Install dependencies
+        run: |
+          if [ -n "${{ matrix.constraint }}" ]; then
+            composer update --with "${{ matrix.constraint }}" --prefer-dist --no-interaction --no-progress
+          else
+            composer update --prefer-dist --no-interaction --no-progress
+          fi
+
+      - name: Report resolved versions
+        run: composer show laravel/ai laravel/mcp laravel/framework pestphp/pest orchestra/testbench phpunit/phpunit
+
+      - name: Run tests
+        run: vendor/bin/pest --compact
+
+  quality:
+    name: Static analysis & formatting
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      - name: Check formatting
+        run: vendor/bin/pint --test
+
+      - name: Static analysis
+        run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G

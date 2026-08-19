@@ -5,6 +5,44 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-19
+
+A dependency and model-registry refresh that fixes a shipped defect: since v1.7.0 the scanner has been unusable on Anthropic's current flagship models. Major only because the `laravel/ai` floor moves from `^0.3` to `^0.11`, which consuming apps must adopt. No scanner behaviour, output contract, or config key changes apart from the additive `cwe` field.
+
+### Measured Impact
+
+- **Fixed: scans against Claude Opus 4.7 and newer failed outright.** v1.7.0's determinism fix began transmitting `temperature` on every request, but Anthropic removed the sampling parameters from Opus 4.7 onward — Opus 4.7/4.8, Opus 5, Sonnet 5 and Fable 5 reject a request carrying `temperature` with HTTP 400. Any user who set `HACK_AUDITOR_AI_MODEL` to one of those models got a failed scan on every run. The parameter is now omitted for models that reject it, so all five work; the default (unpinned) path was unaffected and is unchanged.
+- **4 of the 5 dated Anthropic model IDs in the registry did not exist.** Anthropic switched to dateless IDs at the 4.6 generation, so `claude-opus-4-8-20260528`, `claude-opus-4-6-20250414` and `claude-sonnet-4-6-20250414` were never real, and `claude-sonnet-4-5-20250514` carried the wrong date (`-20250929`). Each would 404 if selected. Removed or corrected, and pricing re-verified against Anthropic's published table on 2026-08-19.
+- **Test suite: 648 → 660 tests** (1583 → 1605 assertions), green on **both** supported stacks — Laravel 12.67 / Pest 4.7.8 / PHPUnit 12.5.33 and Laravel 13.26.1 / Pest 5.1.1 / PHPUnit 13.3.0. Both legs were run before release, not inferred.
+- **`ScannerAgent` lost 45 lines and its `eval()` call.** laravel/ai 0.6.4 added method-based generation options, retiring the runtime class-synthesis workaround that existed only because attribute arguments must be constant expressions. Removing `eval()` from a security-audit tool is worth the major bump on its own.
+- **Static analysis is enforced again.** `phpstan.neon` had included a larastan extension that was never declared as a dependency, so the config had been inert; PHPStan level 8 now runs in CI over an 84-error baseline that blocks new findings.
+
+### Added
+
+- **`AiProviders::supportsSamplingParams()`** and an optional per-model `sampling` flag in the registry, recording whether a model accepts `temperature`/`top_p`/`top_k`. Unknown and unpinned models default to accepting them, so the deterministic low-temperature scan is preserved everywhere it still works.
+- **Current Anthropic models**: `claude-opus-5` ($5/$25, 1M context — now the model `recommendedForScanning()` returns), `claude-sonnet-5` ($3/$15, 1M), `claude-fable-5` ($10/$50, 1M), plus `claude-opus-4-5` and its dated alias.
+- **`cwe` on every finding in `toArray()`** — `VulnerabilityType::cweId()` existed since v1.7 but reached only the MCP formatter, so JSON consumers could not see it. This unblocks faithful SARIF output in the GitHub Action.
+- **CI (`.github/workflows/tests.yml`)** — the package had none. Three test legs (PHP 8.3 + Laravel 12, PHP 8.4 + Laravel 13, PHP 8.5 + Laravel 13) plus a Pint and PHPStan job. The Laravel 12 leg exists because Pest 5 requires PHP 8.4 and cannot resolve against Laravel 12 at all (`symfony/process ^8.1` vs `^7.2`); without it the declared `php ^8.3` and `illuminate/* ^12.41.1` support would ship untested, since Composer validates the live interpreter rather than the declared floor.
+
+### Changed
+
+- **`laravel/ai` `^0.3|^1.0` → `^0.11|^1.0`** (breaking). Composer's caret pins the minor on 0.x, so `^0.3` could never resolve 0.11.0. The SDK surface we consume is unchanged — `prompt()`, `->text` and the usage accessors all kept their signatures.
+- **`laravel/mcp` `^0.6` → `^0.6|^0.7.1|^0.8|^0.9`**, resolving 0.9.4. The one source-breaking change in that range (JSON-RPC primitives moving to a shared namespace in 0.7.1) touches classes this package does not reference. `^1.0` is deliberately excluded: it drops the initialize handshake and serves only MCP 2026-07-28, a genuine protocol break. Host apps also need `laravel/boost` ≥ 2.4.13 to actually receive 0.9.x — earlier versions cap it below 0.7.1.
+- **Dev dependencies** widened to unions rather than pinned: `orchestra/testbench ^10.11|^11.2`, `pestphp/pest ^4.7|^5.1`, `laravel/pint ^1.30.5`. Testbench 11 is Laravel 13 only, so pinning it alone would have silently dropped Laravel 12 from the matrix.
+- **`ScannerAgent` now takes `temperature` and `maxTokens` as constructor arguments** and exposes them as methods. It deliberately carries no `#[Temperature]` attribute: laravel/ai falls back to the attribute when the method returns `null`, so an attribute would silently reinstate the 400 on Opus 4.7+. A regression test asserts the null survives resolution.
+- `claude-sonnet-4-5` and `claude-opus-4-5` context corrected to 200K (they are not 1M models).
+
+### Fixed
+
+- Removed two PHPStan options (`checkMissingIterableValueType`, `checkGenericClassInNonGenericObjectType`) that PHPStan 2.x rejects outright, which had made the config unloadable.
+
+### Upgrading from 1.7
+
+Run `composer update mahdisphp/laravel-hack-auditor -W`. Two things to check:
+
+1. **`laravel/ai` must move to ^0.11.** If your app pins it lower, that pin has to move first.
+2. **Ollama users:** laravel/ai renamed `OLLAMA_BASE_URL` to `OLLAMA_URL`. If you run the zero-egress local-model path against a non-default host, the old variable is now ignored **silently** and the client falls back to `http://localhost:11434`. No error is raised. Nothing in this package reads that variable — the rename is upstream — but your `.env` needs updating.
+
 ## [1.7.0] - 2026-06-01
 
 This cycle adds four strategic differentiators — a deterministic Laravel access-control engine, an MCP server, a provable-accuracy benchmark, and a zero-egress privacy layer — plus a refreshed model registry and a fix for a silent determinism bug.

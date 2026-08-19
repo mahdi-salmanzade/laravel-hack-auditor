@@ -1,5 +1,8 @@
 includes:
     - ./vendor/larastan/larastan/extension.neon
+    # 84 pre-existing level-8 findings, captured so CI blocks new ones while the
+    # existing debt stays visible. Shrink it, never regenerate it wholesale.
+    - ./phpstan-baseline.neon
 
 parameters:
     paths:
@@ -8,6 +11,3 @@ parameters:
     level: 8
 
     ignoreErrors: []
-
-    checkMissingIterableValueType: false
-    checkGenericClassInNonGenericObjectType: false

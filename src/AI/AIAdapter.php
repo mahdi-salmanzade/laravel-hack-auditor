@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\AI;
 
 use Illuminate\Support\Facades\Log;
+use Mahdi\HackAuditor\Support\AiProviders;
 use RuntimeException;
 
 class AIAdapter
@@ -13,7 +14,11 @@ class AIAdapter
 
     private readonly ?string $model;
 
-    private readonly float $temperature;
+    /**
+     * Null when the configured model rejects sampling parameters, which omits
+     * temperature from the request entirely.
+     */
+    private readonly ?float $temperature;
 
     private readonly int $maxTokens;
 
@@ -43,9 +48,25 @@ class AIAdapter
 
         $this->provider = $provider;
         $this->model = $model;
-        $this->temperature = $temperature;
+
+        // Anthropic removed the sampling parameters from Claude Opus 4.7 onward;
+        // sending temperature to Opus 4.7/4.8, Opus 5, Sonnet 5 or Fable 5 returns
+        // HTTP 400 and fails the scan. Omit it rather than break those models.
+        $this->temperature = AiProviders::supportsSamplingParams($provider, $model)
+            ? $temperature
+            : null;
+
         $this->maxTokens = $maxTokens;
         $this->timeout = $timeout;
+    }
+
+    /**
+     * The temperature that will be transmitted, or null when the configured
+     * model rejects sampling parameters.
+     */
+    public function temperature(): ?float
+    {
+        return $this->temperature;
     }
 
     /**
@@ -183,14 +204,14 @@ class AIAdapter
     /**
      * Build a scan agent carrying the configured generation options.
      *
-     * laravel/ai 0.3.x reads temperature and max tokens only from class-level
-     * attributes via reflection, so {@see ScannerAgent::for()} synthesises an
-     * agent whose attributes encode the configured values, ensuring they reach
-     * the provider on every request rather than falling back to its defaults.
+     * laravel/ai resolves these from the agent's temperature() / maxTokens()
+     * methods, so the configured values reach the provider on every request
+     * rather than falling back to its defaults. A null temperature is omitted
+     * from the request entirely.
      */
     private function buildAgent(string $systemPrompt): ScannerAgent
     {
-        return ScannerAgent::for(
+        return new ScannerAgent(
             instructions: $systemPrompt,
             temperature: $this->temperature,
             maxTokens: $this->maxTokens,

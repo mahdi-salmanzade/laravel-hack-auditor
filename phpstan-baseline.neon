@@ -1,0 +1,415 @@
+parameters:
+	ignoreErrors:
+		-
+			message: '#^Property Laravel\\Ai\\Responses\\Data\\Usage\:\:\$completionTokens \(int\) on left side of \?\? is not nullable\.$#'
+			identifier: nullCoalesce.property
+			count: 1
+			path: src/AI/AIAdapter.php
+
+		-
+			message: '#^Property Laravel\\Ai\\Responses\\Data\\Usage\:\:\$promptTokens \(int\) on left side of \?\? is not nullable\.$#'
+			identifier: nullCoalesce.property
+			count: 1
+			path: src/AI/AIAdapter.php
+
+		-
+			message: '#^Using nullsafe method call on non\-nullable type Throwable\. Use \-\> instead\.$#'
+			identifier: nullsafe.neverNull
+			count: 2
+			path: src/AI/AIAdapter.php
+
+		-
+			message: '#^Method Mahdi\\HackAuditor\\AI\\ScannerAgent\:\:__construct\(\) has parameter \$messages with no value type specified in iterable type iterable\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/AI/ScannerAgent.php
+
+		-
+			message: '#^Method Mahdi\\HackAuditor\\AI\\ScannerAgent\:\:__construct\(\) has parameter \$tools with no value type specified in iterable type iterable\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/AI/ScannerAgent.php
+
+		-
+			message: '#^Cannot access offset ''config'' on Illuminate\\Contracts\\Foundation\\Application\.$#'
+			identifier: offsetAccess.nonOffsetAccessible
+			count: 1
+			path: src/Console/HackBenchmarkCommand.php
+
+		-
+			message: '#^Method Mahdi\\HackAuditor\\Console\\HackDemoCommand\:\:truncate\(\) is unused\.$#'
+			identifier: method.unused
+			count: 1
+			path: src/Console/HackDemoCommand.php
+
+		-
+			message: '#^Parameter \#1 \$string of function trim expects string, string\|false given\.$#'
+			identifier: argument.type
+			count: 1
+			path: src/Console/HackDemoCommand.php
+
+		-
+			message: '#^Called ''env'' outside of the config directory which returns null when the config is cached, use ''config''\.$#'
+			identifier: larastan.noEnvCallsOutsideOfConfig
+			count: 3
+			path: src/Console/HackHelpCommand.php
+
+		-
+			message: '#^Cannot call method find\(\) on Symfony\\Component\\Console\\Application\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackHelpCommand.php
+
+		-
+			message: '#^Argument of an invalid type list\<string\>\|false supplied for foreach, only iterables are supported\.$#'
+			identifier: foreach.nonIterable
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method estimateCost\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method getCompletionTokens\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method getElapsedSeconds\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method getPromptTokens\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method getRequests\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method getTokenLimit\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method getUsagePercent\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method isLimitSet\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method toArray\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 2
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot call method totalTokens\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 2
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Cannot cast array\|bool\|float\|int\|string\|null to string\.$#'
+			identifier: cast.string
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Offset ''critical''\|''high''\|''low''\|''medium'' on array\{critical\: 4, high\: 3, medium\: 2, low\: 1\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 4
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Offset ''model'' on array\{input\: float, output\: float, provider\: string, model\: string, source\: string\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Offset ''name'' on array\{input\: float, output\: float, context\: int, tier\: string, sampling\?\: bool, alias_of\?\: string\}\|null on left side of \?\? does not exist\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Parameter \#1 \$string of function trim expects string, string\|false given\.$#'
+			identifier: argument.type
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Parameter \#1 \$string of function wordwrap expects string, string\|null given\.$#'
+			identifier: argument.type
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Parameter \#1 \$tracker of method Mahdi\\HackAuditor\\Support\\UsageLog\:\:record\(\) expects Mahdi\\HackAuditor\\Support\\UsageTracker, Mahdi\\HackAuditor\\Support\\UsageTracker\|null given\.$#'
+			identifier: argument.type
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Parameter \#1 \$value of function count expects array\|Countable, list\<string\>\|false given\.$#'
+			identifier: argument.type
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between string and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Variable \$report in PHPDoc tag @var does not exist\.$#'
+			identifier: varTag.variableNotFound
+			count: 1
+			path: src/Console/HackScanCommand.php
+
+		-
+			message: '#^Parameter \#2 \$timestamp of function date expects int\|null, int\|false given\.$#'
+			identifier: argument.type
+			count: 1
+			path: src/Console/HackUsageCommand.php
+
+		-
+			message: '#^Class Mahdi\\HackAuditor\\Facades\\HackAuditor has PHPDoc tag @method for method generateReport\(\) parameter \#2 \$meta with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/HackAuditor.php
+
+		-
+			message: '#^Cannot call method estimateCost\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Cannot call method getCompletionTokens\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Cannot call method getElapsedSeconds\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Cannot call method getPromptTokens\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Cannot call method getRequests\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Cannot call method getTokenLimit\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Cannot call method getUsagePercent\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Cannot call method isLimitSet\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Cannot call method totalTokens\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Offset ''critical''\|''high''\|''low''\|''medium'' might not exist on non\-empty\-array\{critical\?\: non\-empty\-list\<Mahdi\\HackAuditor\\Scanner\\Vulnerability\>, high\?\: non\-empty\-list\<Mahdi\\HackAuditor\\Scanner\\Vulnerability\>, medium\?\: non\-empty\-list\<Mahdi\\HackAuditor\\Scanner\\Vulnerability\>, low\?\: non\-empty\-list\<Mahdi\\HackAuditor\\Scanner\\Vulnerability\>\}\.$#'
+			identifier: offsetAccess.notFound
+			count: 1
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Offset ''critical''\|''high''\|''low''\|''medium'' on array\{critical\: 0, high\: 1, medium\: 2, low\: 3\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 2
+			path: src/Report/HtmlReportGenerator.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<Mahdi\\HackAuditor\\Scanner\\Vulnerability\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: src/Scanner/AccessControl/AccessControlAnalyzer.php
+
+		-
+			message: '#^Offset 0 on array\{non\-empty\-string, int\<\-1, max\>\} in isset\(\) always exists and is not nullable\.$#'
+			identifier: isset.offset
+			count: 1
+			path: src/Scanner/AccessControl/UnauthorizedModelFetchDetector.php
+
+		-
+			message: '#^Offset 0 on array\{non\-empty\-string, int\<\-1, max\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 2
+			path: src/Scanner/AccessControl/UnauthorizedModelFetchDetector.php
+
+		-
+			message: '#^Offset ''authorize'' on array\{authorize\: string, rules\: array\<string, string\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Offset ''casts''\|''fillable''\|''guarded''\|''hidden''\|''traits'' on array\{fillable\: array\<int, string\>, hidden\: array\<int, string\>, guarded\: array\<int, string\>, casts\: array\<string, string\>, traits\: array\<int, string\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Offset ''method'' on array\{method\: string, uri\: string, middleware\: array\<int, string\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Offset ''methods'' on array\{policy\: string, methods\: array\<int, string\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Offset ''middleware'' on array\{method\: string, uri\: string, middleware\: array\<int, string\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Offset ''policy'' on array\{policy\: string, methods\: array\<int, string\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Offset ''rules'' on array\{authorize\: string, rules\: array\<string, string\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Offset ''uri'' on array\{method\: string, uri\: string, middleware\: array\<int, string\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Parameter \#1 \$callback of function array_map expects \(callable\(int\|string, string\)\: mixed\)\|null, Closure\(string, string\)\: non\-falsy\-string given\.$#'
+			identifier: argument.type
+			count: 1
+			path: src/Scanner/AppContext.php
+
+		-
+			message: '#^Call to function is_array\(\) with array\<int, array\{file\: string, line\: int, type\: string, hash\: string\}\> will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: src/Scanner/Baseline.php
+
+		-
+			message: '#^Offset ''prefix'' on array\{middleware\: array\<int, string\>, prefix\: string, start\: int, end\: int\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/ContextCollector.php
+
+		-
+			message: '#^Offset 3 might not exist on array\{0\: string, 1\: non\-empty\-string, 2\?\: non\-empty\-string, 3\?\: non\-empty\-string\}\.$#'
+			identifier: offsetAccess.notFound
+			count: 1
+			path: src/Scanner/ContextCollector.php
+
+		-
+			message: '#^Offset 4 on array\{string, non\-falsy\-string, non\-empty\-string, non\-empty\-string, string\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/ContextCollector.php
+
+		-
+			message: '#^Parameter \#2 \$groupBoundaries of method Mahdi\\HackAuditor\\Scanner\\ContextCollector\:\:getPrefixForPosition\(\) expects array\<int, array\{middleware\: array\<int, string\>, prefix\: string, start\: int, end\: int\}\>, array\<int, array\{middleware\: array\<int, string\>, start\: int, end\: int\}\> given\.$#'
+			identifier: argument.type
+			count: 4
+			path: src/Scanner/ContextCollector.php
+
+		-
+			message: '#^Method Mahdi\\HackAuditor\\Scanner\\GitDiffCollector\:\:detectBaseBranch\(\) is unused\.$#'
+			identifier: method.unused
+			count: 1
+			path: src/Scanner/GitDiffCollector.php
+
+		-
+			message: '#^Parameter \#1 \$array \(list\<non\-falsy\-string\>\) of array_values is already a list, call has no effect\.$#'
+			identifier: arrayValues.list
+			count: 1
+			path: src/Scanner/GitDiffCollector.php
+
+		-
+			message: '#^Method Mahdi\\HackAuditor\\Scanner\\HackScanner\:\:loadFileForVerification\(\) has parameter \$cache with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Scanner/HackScanner.php
+
+		-
+			message: '#^Method Mahdi\\HackAuditor\\Scanner\\RouteAnalyzer\:\:bodyReferencesController\(\) is unused\.$#'
+			identifier: method.unused
+			count: 1
+			path: src/Scanner/RouteAnalyzer.php
+
+		-
+			message: '#^Offset 4 on array\{string, non\-falsy\-string, non\-empty\-string, non\-empty\-string, string\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Scanner/RouteAnalyzer.php
+
+		-
+			message: '#^Argument of an invalid type Illuminate\\Routing\\RouteCollectionInterface supplied for foreach, only iterables are supported\.$#'
+			identifier: foreach.nonIterable
+			count: 2
+			path: src/Scanner/RuntimeIntrospector.php
+
+		-
+			message: '#^Cannot call method toArray\(\) on Mahdi\\HackAuditor\\Support\\UsageTracker\|null\.$#'
+			identifier: method.nonObject
+			count: 1
+			path: src/Scanner/VulnerabilityReport.php
+
+		-
+			message: '#^Called ''env'' outside of the config directory which returns null when the config is cached, use ''config''\.$#'
+			identifier: larastan.noEnvCallsOutsideOfConfig
+			count: 2
+			path: src/Support/AiProviders.php

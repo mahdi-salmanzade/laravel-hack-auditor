@@ -89,7 +89,7 @@ Every scan shows token consumption and estimated cost. Auto-detects your AI prov
 Token Usage ...... 97,188 prompt + 3,080 completion = 100,268 total
 AI Requests ...... 7
 Estimated Cost ... $0.5629
-Model ............ claude-opus-4-6 (anthropic)
+Model ............ claude-opus-5 (anthropic)
 ```
 
 ## Quick setup (2 minutes)
@@ -114,8 +114,15 @@ Done. The package uses whatever provider you configured in Laravel AI. Optionall
 
 ```env
 HACK_AUDITOR_AI_PROVIDER=anthropic
-HACK_AUDITOR_AI_MODEL=claude-opus-4-6
+HACK_AUDITOR_AI_MODEL=claude-opus-5
 ```
+
+> **On sampling parameters.** Scans run at a low fixed temperature for
+> reproducibility, but Anthropic removed `temperature` from Claude Opus 4.7
+> onward — sending it to Opus 4.7/4.8, Opus 5, Sonnet 5 or Fable 5 returns
+> HTTP 400. The scanner detects those models and omits the parameter, so they
+> work out of the box; on those models reproducibility comes from the
+> deterministic detection engine rather than from temperature.
 
 <details>
 <summary><strong>All scan flags</strong></summary>

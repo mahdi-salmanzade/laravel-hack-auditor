@@ -6,33 +6,55 @@ namespace Mahdi\HackAuditor\Support;
 
 final class AiProviders
 {
-    // Pricing last verified: June 2026. Rates change — override via config if needed.
+    // Pricing last verified: 19 August 2026 against platform.claude.com/docs/en/about-claude/models/overview.
+    // Rates change — override via config if needed.
+    //
+    // The optional 'sampling' key marks whether a model accepts the temperature /
+    // top_p / top_k sampling parameters. Anthropic removed them from Claude Opus 4.7
+    // onward: sending temperature to those models returns HTTP 400. Models without
+    // the key are assumed to accept sampling. See self::supportsSamplingParams().
     private const PROVIDERS = [
         'anthropic' => [
             'name' => 'Anthropic',
             'env_key' => 'ANTHROPIC_API_KEY',
             'models' => [
+                // NOTE: model IDs are dateless from the Claude 4.6 generation onward —
+                // each dateless ID is itself a pinned snapshot, not a moving pointer.
+                // Only pre-4.6 models carry dated aliases.
+                //
                 // NOTE: Opus 4.7+ use a new tokenizer that can consume up to ~35% more
                 // tokens for the same text than earlier Claude models. Chunking math is
                 // unchanged here — this is a heads-up for cost/context estimation only.
+                //
+                // Order matters: recommendedForScanning() returns the first non-alias
+                // 'flagship' entry and defaultModel() the first non-alias 'balanced' one.
+                'claude-opus-5' => [
+                    'input' => 5.00,
+                    'output' => 25.00,
+                    'context' => 1_000_000,
+                    'tier' => 'flagship',
+                    'sampling' => false,
+                ],
+                'claude-fable-5' => [
+                    'input' => 10.00,
+                    'output' => 50.00,
+                    'context' => 1_000_000,
+                    'tier' => 'flagship',
+                    'sampling' => false,
+                ],
                 'claude-opus-4-8' => [
                     'input' => 5.00,
                     'output' => 25.00,
                     'context' => 1_000_000,
                     'tier' => 'flagship',
-                ],
-                'claude-opus-4-8-20260528' => [
-                    'input' => 5.00,
-                    'output' => 25.00,
-                    'context' => 1_000_000,
-                    'tier' => 'flagship',
-                    'alias_of' => 'claude-opus-4-8',
+                    'sampling' => false,
                 ],
                 'claude-opus-4-7' => [
                     'input' => 5.00,
                     'output' => 25.00,
                     'context' => 1_000_000,
                     'tier' => 'flagship',
+                    'sampling' => false,
                 ],
                 'claude-opus-4-6' => [
                     'input' => 5.00,
@@ -40,12 +62,28 @@ final class AiProviders
                     'context' => 1_000_000,
                     'tier' => 'flagship',
                 ],
-                'claude-opus-4-6-20250414' => [
+                'claude-opus-4-5' => [
                     'input' => 5.00,
                     'output' => 25.00,
-                    'context' => 1_000_000,
+                    'context' => 200_000,
                     'tier' => 'flagship',
-                    'alias_of' => 'claude-opus-4-6',
+                ],
+                'claude-opus-4-5-20251101' => [
+                    'input' => 5.00,
+                    'output' => 25.00,
+                    'context' => 200_000,
+                    'tier' => 'flagship',
+                    'alias_of' => 'claude-opus-4-5',
+                ],
+                // Standard rate. Anthropic ran a $2/$10 introductory rate on Claude
+                // Sonnet 5 through 2026-08-31; estimates use the post-intro price so
+                // they do not under-report once it lapses.
+                'claude-sonnet-5' => [
+                    'input' => 3.00,
+                    'output' => 15.00,
+                    'context' => 1_000_000,
+                    'tier' => 'balanced',
+                    'sampling' => false,
                 ],
                 'claude-sonnet-4-6' => [
                     'input' => 3.00,
@@ -53,23 +91,16 @@ final class AiProviders
                     'context' => 1_000_000,
                     'tier' => 'balanced',
                 ],
-                'claude-sonnet-4-6-20250414' => [
-                    'input' => 3.00,
-                    'output' => 15.00,
-                    'context' => 1_000_000,
-                    'tier' => 'balanced',
-                    'alias_of' => 'claude-sonnet-4-6',
-                ],
                 'claude-sonnet-4-5' => [
                     'input' => 3.00,
                     'output' => 15.00,
-                    'context' => 1_000_000,
+                    'context' => 200_000,
                     'tier' => 'balanced',
                 ],
-                'claude-sonnet-4-5-20250514' => [
+                'claude-sonnet-4-5-20250929' => [
                     'input' => 3.00,
                     'output' => 15.00,
-                    'context' => 1_000_000,
+                    'context' => 200_000,
                     'tier' => 'balanced',
                     'alias_of' => 'claude-sonnet-4-5',
                 ],
@@ -290,13 +321,42 @@ final class AiProviders
     /**
      * Get full model information for a specific provider and model.
      *
-     * @return array{input: float, output: float, context: int, tier: string, alias_of?: string}|null
+     * @return array{input: float, output: float, context: int, tier: string, sampling?: bool, alias_of?: string}|null
      */
     public static function model(string $provider, string $model): ?array
     {
         $provider = strtolower($provider);
 
         return self::resolveModel($provider, $model);
+    }
+
+    /**
+     * Determine whether a model accepts the sampling parameters (temperature,
+     * top_p, top_k).
+     *
+     * Anthropic removed these from Claude Opus 4.7 onward — Opus 4.7/4.8,
+     * Opus 5, Sonnet 5 and Fable 5 reject a request carrying temperature with
+     * HTTP 400 invalid_request_error. Sending a fixed temperature to one of
+     * those models fails every scan, so the scanner omits it instead.
+     *
+     * Defaults to true: an unknown or unpinned model is assumed to accept
+     * sampling, preserving the deterministic low-temperature scan everywhere
+     * it is still supported.
+     */
+    public static function supportsSamplingParams(?string $provider, ?string $model): bool
+    {
+        if ($model === null || $model === '') {
+            return true;
+        }
+
+        // An empty provider falls through resolveModel() to its cross-provider search.
+        $modelInfo = self::resolveModel(strtolower($provider ?? ''), $model);
+
+        if ($modelInfo === null) {
+            return true;
+        }
+
+        return $modelInfo['sampling'] ?? true;
     }
 
     /**
@@ -539,7 +599,7 @@ final class AiProviders
      *
      * Tries: direct match, str_starts_with both directions, then cross-provider search.
      *
-     * @return array{input: float, output: float, context: int, tier: string, alias_of?: string}|null
+     * @return array{input: float, output: float, context: int, tier: string, sampling?: bool, alias_of?: string}|null
      */
     private static function resolveModel(string $provider, string $model): ?array
     {

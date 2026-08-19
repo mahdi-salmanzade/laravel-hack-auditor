@@ -24,16 +24,43 @@ it('opus 4.8 is recognized as a known model', function (): void {
     expect(AiProviders::isKnownModel('claude-opus-4-8'))->toBeTrue();
 });
 
-it('opus 4.8 dated alias fuzzy matches to flagship pricing', function (): void {
-    $pricing = AiProviders::pricing('anthropic', 'claude-opus-4-8-20260528');
-
-    expect($pricing)->not->toBeNull()
-        ->and($pricing['input'])->toBe(5.00)
-        ->and($pricing['output'])->toBe(25.00);
+it('recommended for scanning returns the opus 5 flagship for anthropic', function (): void {
+    expect(AiProviders::recommendedForScanning('anthropic'))->toBe('claude-opus-5');
 });
 
-it('recommended for scanning returns opus 4.8 flagship for anthropic', function (): void {
-    expect(AiProviders::recommendedForScanning('anthropic'))->toBe('claude-opus-4-8');
+it('prices the current anthropic flagship and balanced models', function (): void {
+    expect(AiProviders::pricing('anthropic', 'claude-opus-5'))
+        ->toBe(['input' => 5.00, 'output' => 25.00])
+        ->and(AiProviders::pricing('anthropic', 'claude-fable-5'))
+        ->toBe(['input' => 10.00, 'output' => 50.00])
+        ->and(AiProviders::pricing('anthropic', 'claude-sonnet-5'))
+        ->toBe(['input' => 3.00, 'output' => 15.00]);
+});
+
+it('reports sampling support per model', function (string $model, bool $supported): void {
+    expect(AiProviders::supportsSamplingParams('anthropic', $model))->toBe($supported);
+})->with([
+    // Anthropic removed temperature/top_p/top_k from Opus 4.7 onward.
+    ['claude-opus-5', false],
+    ['claude-fable-5', false],
+    ['claude-opus-4-8', false],
+    ['claude-opus-4-7', false],
+    ['claude-sonnet-5', false],
+    // Still accepted here.
+    ['claude-opus-4-6', true],
+    ['claude-sonnet-4-6', true],
+    ['claude-haiku-4-5', true],
+]);
+
+it('assumes sampling support for unknown or unpinned models', function (): void {
+    expect(AiProviders::supportsSamplingParams('anthropic', null))->toBeTrue()
+        ->and(AiProviders::supportsSamplingParams(null, null))->toBeTrue()
+        ->and(AiProviders::supportsSamplingParams('openai', 'gpt-4o'))->toBeTrue()
+        ->and(AiProviders::supportsSamplingParams(null, 'some-unreleased-model'))->toBeTrue();
+});
+
+it('resolves sampling support without a provider hint', function (): void {
+    expect(AiProviders::supportsSamplingParams(null, 'claude-opus-5'))->toBeFalse();
 });
 
 it('pricing returns correct rates for openai gpt4o', function (): void {

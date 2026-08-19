@@ -12,15 +12,16 @@
     ],
     "require": {
         "php": "^8.3",
-        "laravel/ai": "^0.3|^1.0",
-        "laravel/mcp": "^0.6",
+        "laravel/ai": "^0.11|^1.0",
+        "laravel/mcp": "^0.6|^0.7.1|^0.8|^0.9",
         "illuminate/support": "^12.41.1|^13.0",
         "illuminate/console": "^12.41.1|^13.0"
     },
     "require-dev": {
-        "orchestra/testbench": "^10.0",
-        "pestphp/pest": "^3.0|^4.0",
-        "laravel/pint": "^1.0"
+        "larastan/larastan": "^3.10",
+        "laravel/pint": "^1.30.5",
+        "orchestra/testbench": "^10.11|^11.2",
+        "pestphp/pest": "^4.7|^5.1"
     },
     "autoload": {
         "psr-4": {
