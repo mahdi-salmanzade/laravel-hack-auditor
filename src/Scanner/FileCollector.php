@@ -79,7 +79,6 @@ final class FileCollector
     {
         $files = new Collection;
         $basePath = base_path();
-        $maxSizeBytes = $this->maxFileSizeKb * 1024;
 
         foreach ($this->paths as $relativePath) {
             $absolutePath = $basePath.DIRECTORY_SEPARATOR.$relativePath;
@@ -92,26 +91,88 @@ final class FileCollector
                 continue;
             }
 
-            $finder = new Finder;
-            $finder->files()->in($absolutePath);
-
-            $this->applyExtensionFilters($finder);
-            $this->applyExcludePatterns($finder);
-            $this->applySensitivePatterns($finder);
-
-            $finder->size('<= '.$maxSizeBytes);
-
-            foreach ($finder as $file) {
-                if ($this->isBinaryFile($file)) {
-                    continue;
-                }
-
+            foreach ($this->findIn($absolutePath) as $file) {
                 $files->push($file);
             }
         }
 
+        return $this->sortByPath($files);
+    }
+
+    /**
+     * Collect scannable PHP files from one specific directory.
+     *
+     * This backs `hack:scan --path=<directory>`, which the signature has always
+     * advertised. It applies the same extension, size, exclusion, sensitive-file
+     * and binary filters as a full scan, so pointing `--path` at a directory can
+     * never widen what a normal scan would read — in particular it can never
+     * reach `.env`, `*.key`, `*.pem` or log files.
+     *
+     * Returns an empty collection when the directory does not exist or is itself
+     * a sensitive location.
+     *
+     * @return Collection<int, SplFileInfo>
+     */
+    public function collectFrom(string $directory): Collection
+    {
+        if (! is_dir($directory)) {
+            return new Collection;
+        }
+
+        if ($this->matchesSensitivePattern($directory)) {
+            return new Collection;
+        }
+
+        $files = new Collection;
+
+        foreach ($this->findIn($directory) as $file) {
+            $realPath = $file->getRealPath();
+
+            if ($realPath !== false && $this->matchesSensitivePattern($realPath)) {
+                continue;
+            }
+
+            $files->push($file);
+        }
+
+        return $this->sortByPath($files);
+    }
+
+    /**
+     * Run a filtered Finder over one directory and yield the surviving files.
+     *
+     * @return \Generator<int, SplFileInfo>
+     */
+    private function findIn(string $absolutePath): \Generator
+    {
+        $finder = new Finder;
+        $finder->files()->in($absolutePath);
+
+        $this->applyExtensionFilters($finder);
+        $this->applyExcludePatterns($finder);
+        $this->applySensitivePatterns($finder);
+
+        $finder->size('<= '.($this->maxFileSizeKb * 1024));
+
+        foreach ($finder as $file) {
+            if ($this->isBinaryFile($file)) {
+                continue;
+            }
+
+            yield $file;
+        }
+    }
+
+    /**
+     * Sort a file collection by absolute path for stable, reproducible ordering.
+     *
+     * @param  Collection<int, SplFileInfo>  $files
+     * @return Collection<int, SplFileInfo>
+     */
+    private function sortByPath(Collection $files): Collection
+    {
         return $files
-            ->sortBy(fn (SplFileInfo $file): string => $file->getRealPath())
+            ->sortBy(fn (SplFileInfo $file): string => (string) $file->getRealPath())
             ->values();
     }
 

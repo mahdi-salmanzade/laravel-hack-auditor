@@ -15,7 +15,8 @@
         "laravel/ai": "^0.11|^1.0",
         "laravel/mcp": "^0.6|^0.7.1|^0.8|^0.9",
         "illuminate/support": "^12.41.1|^13.0",
-        "illuminate/console": "^12.41.1|^13.0"
+        "illuminate/console": "^12.41.1|^13.0",
+        "nikic/php-parser": "^5.8"
     },
     "require-dev": {
         "larastan/larastan": "^3.10",

@@ -138,7 +138,7 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=cyan>$report  = $manager->scanCode($phpCode);</>');
         $this->line('  <fg=cyan>$ctf     = $manager->generateCTF(\'sql_injection\');</>');
         $this->line('  <fg=cyan>$html    = $manager->generateReport($report);</>');
-        $this->line('  <fg=cyan>$score   = $manager->score();</>');
+        $this->line('  <fg=cyan>$score   = $manager->score(); // null when coverage was incomplete</>');
         $this->line('');
 
         $this->showCurrentSetup();
@@ -316,7 +316,10 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=gray>  Save results to storage/hack-auditor/scans/</>');
         $this->line('');
         $this->line('  <fg=cyan>$ php artisan hack:scan --json --force 2>/dev/null | jq .overall_score</>');
-        $this->line('  <fg=gray>  Extract just the score for CI gating</>');
+        $this->line('  <fg=gray>  Extract just the score for CI gating (null when coverage was incomplete)</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:scan --json --force 2>/dev/null | jq .coverage</>');
+        $this->line('  <fg=gray>  Check which files were analyzed before trusting the score</>');
         $this->line('');
 
         $this->line('  <fg=white;options=bold>DIFF & BASELINE</>');

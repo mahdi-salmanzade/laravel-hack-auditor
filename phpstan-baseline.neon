@@ -127,12 +127,6 @@ parameters:
 			path: src/Console/HackScanCommand.php
 
 		-
-			message: '#^Cannot cast array\|bool\|float\|int\|string\|null to string\.$#'
-			identifier: cast.string
-			count: 1
-			path: src/Console/HackScanCommand.php
-
-		-
 			message: '#^Offset ''critical''\|''high''\|''low''\|''medium'' on array\{critical\: 4, high\: 3, medium\: 2, low\: 1\} on left side of \?\? always exists and is not nullable\.$#'
 			identifier: nullCoalesce.offset
 			count: 4
@@ -163,12 +157,6 @@ parameters:
 			path: src/Console/HackScanCommand.php
 
 		-
-			message: '#^Parameter \#1 \$tracker of method Mahdi\\HackAuditor\\Support\\UsageLog\:\:record\(\) expects Mahdi\\HackAuditor\\Support\\UsageTracker, Mahdi\\HackAuditor\\Support\\UsageTracker\|null given\.$#'
-			identifier: argument.type
-			count: 1
-			path: src/Console/HackScanCommand.php
-
-		-
 			message: '#^Parameter \#1 \$value of function count expects array\|Countable, list\<string\>\|false given\.$#'
 			identifier: argument.type
 			count: 1
@@ -177,12 +165,6 @@ parameters:
 		-
 			message: '#^Strict comparison using \!\=\= between string and null will always evaluate to true\.$#'
 			identifier: notIdentical.alwaysTrue
-			count: 1
-			path: src/Console/HackScanCommand.php
-
-		-
-			message: '#^Variable \$report in PHPDoc tag @var does not exist\.$#'
-			identifier: varTag.variableNotFound
 			count: 1
 			path: src/Console/HackScanCommand.php
 
@@ -269,18 +251,6 @@ parameters:
 			identifier: arrayValues.list
 			count: 1
 			path: src/Scanner/AccessControl/AccessControlAnalyzer.php
-
-		-
-			message: '#^Offset 0 on array\{non\-empty\-string, int\<\-1, max\>\} in isset\(\) always exists and is not nullable\.$#'
-			identifier: isset.offset
-			count: 1
-			path: src/Scanner/AccessControl/UnauthorizedModelFetchDetector.php
-
-		-
-			message: '#^Offset 0 on array\{non\-empty\-string, int\<\-1, max\>\} on left side of \?\? always exists and is not nullable\.$#'
-			identifier: nullCoalesce.offset
-			count: 2
-			path: src/Scanner/AccessControl/UnauthorizedModelFetchDetector.php
 
 		-
 			message: '#^Offset ''authorize'' on array\{authorize\: string, rules\: array\<string, string\>\} on left side of \?\? always exists and is not nullable\.$#'

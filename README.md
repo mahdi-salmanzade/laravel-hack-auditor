@@ -33,7 +33,7 @@ php artisan hack:scan                   # Scan YOUR app with AI
 php artisan hack:scan --diff --html     # Scan only changed files, export HTML report
 php artisan hack:ctf sql_injection      # Turn vulns into CTF challenges
 php artisan hack:report --latest        # Generate HTML report from saved scan
-php artisan hack:benchmark              # Measure accuracy (precision/recall/F1) on a labeled corpus
+php artisan hack:benchmark              # Measure recall (precision/recall/F1) on the labeled corpus
 php artisan hack:help                   # Full command reference
 php artisan hack:usage                  # Token usage & cost stats
 php artisan mcp:start hack-auditor      # Expose the scanner to AI agents (Claude Code, Cursor)
@@ -45,27 +45,58 @@ php artisan mcp:start hack-auditor      # Expose the scanner to AI agents (Claud
 - "Login route has no throttle middleware" *(Brute-forceable)*
 - "Any authenticated user can set their own plan to 'pro' without payment" *(Auth bypass)*
 
-20 vulnerability types. OWASP Top 10 mapped, each with a CWE id. Every finding has file, line, explanation, and a copy-paste fix.
+20 vulnerability types. OWASP Top 10 mapped, each with a CWE id. Every finding has file, line and an explanation — and a suggested fix **only when the scanner can prove every identifier it would name**. See [Precision](#precision-measured-on-real-code).
 
 ### Deterministic detection engine — not just the AI
 
 Alongside the AI pass, framework-aware detectors run on every scan and merge into the report, giving **reproducible** coverage that doesn't drift with AI run-to-run variance: IDOR / broken access control (policy-vs-route mismatch, `is_admin` in `$fillable`, unauthorized `find()`/`findOrFail()` exposure), **SSRF** (`Http::get()`/cURL with a user-controlled URL), and **sensitive-data exposure** (password/token/secret fields returned in a response). These are the OWASP-#1 access-control bugs generic SAST and generic AI both miss because they don't understand Laravel.
 
-### Measured accuracy — not a marketing claim
+The engine parses your code into a real AST (`nikic/php-parser`) and resolves Laravel semantics before deciding anything: what a receiver's *type* is, so an Eloquent `->get()` and a local service's `->delete()` are not mistaken for HTTP calls; which abilities a Policy actually *declares*, so a missing `store` ability is not reported as a bypass; and that `$request->user()` is the authenticated user rather than attacker-controlled input. Earlier versions pattern-matched raw source and got all three wrong.
 
-`hack:benchmark` runs the scanner against a labeled corpus and reports precision / recall / F1, usable as a CI gate (`--min-f1`). Measured on the bundled corpus: **F1 ≈ 0.94, recall 1.00 (0 false negatives)**. The number is reproducible and ships in the repo — run it yourself.
+### Measured accuracy — and what the measurement is worth
+
+`hack:benchmark` runs the scanner against the labeled corpus in `tests/Fixtures/benchmark/` and reports precision / recall / F1 overall and per type, usable as a CI gate (`--min-f1`). It ships in the repo — run it yourself.
+
+**Read the number for what it is.** That corpus is *synthetic*: every sample was authored alongside the detectors, and the routes that expose them are declared in the corpus's own `routes.php`. It is a **recall check and a regression gate** — "does the engine still find the bugs it is supposed to find" — **not a precision claim about real code.** Nothing in it has the ambiguity, framework idiom or deliberate-by-design pattern that produces false positives in a real application. The command prints this caveat with every result so a number copied out of a terminal carries its own scope. Real-code precision is measured separately, against unmodified third-party Laravel applications.
+
+```bash
+php artisan hack:benchmark --deterministic   # reproducible engine only — no AI key, no network
+php artisan hack:benchmark --min-f1=0.9      # full pipeline (AI + deterministic), CI gate
+```
+
+`--deterministic` scores only the labels the provider-independent detectors own, so the reproducible half of the scanner can be gated on every commit with no API key.
+
+**Why the corpus ships a route manifest.** The access-control engine refuses to report a record exposure it cannot attribute to a routed entry point — the rule that took 191 false IDOR reports on 6,221 real files down to zero. Standalone fixture files have no application around them, so without a route table every sample resolved to *unreachable* and was dropped before analysis: the gate kept printing a score for detectors it had stopped exercising. `tests/Fixtures/benchmark/routes.php` gives the corpus what a real app has. The reachability rule is untouched; a controller sample with no route entry now fails the run loudly rather than being silently unmeasured.
 
 ### Call it from your AI editor
 
 `mcp:start hack-auditor` exposes the scanner as MCP tools (`scan_path`, `scan_diff`, `explain_finding`) so Claude Code, Cursor, and other agents can run a real taint-aware Laravel audit mid-edit instead of guessing.
 
-### Low false-positive rate
+### Precision, measured on real code
 
-v1.5 introduces **taint analysis** — the AI must trace every input-dependent finding as `SOURCE → TRANSFORMS → SINK` before reporting it. The parser then programmatically verifies the trace: if the source is `config()` not `$request->input()`, auto-drop. If an `(int)` cast or `$request->validated()` breaks the chain, auto-drop. Zero extra API calls.
+**The measurement.** The deterministic engine was run over **6,221 files** from six large open-source Laravel applications — Monica, Akaunting, Pixelfed, BookStack, Snipe-IT, Koel — plus the Laravel framework's own `src/`. None of them was consulted while writing the detectors.
 
-On top of that, v1.4's context-aware scanning reads your actual Laravel architecture — route middleware stacks, FormRequest `authorize()` methods, Eloquent `$fillable`/`$hidden`, policies, global scopes — and feeds it all to the AI before analysis. Framework-aware allowlists recognize `$this->authorize()`, `Gate::define()`, `$request->validated()`, and other Laravel conventions that eliminate entire classes of false positives.
+| | asserted vulnerabilities | review items |
+|---|---|---|
+| without a route map | **0** | 28 |
+| with a route map (what a real scan has) | **0** | 3 |
 
-Tested on production Laravel apps with 15-42 controllers and a deliberately vulnerable test app (100% true positive rate, 0 false positives).
+Zero asserted findings on well-maintained real code. Recall was held while getting there: the deliberately-vulnerable [laravel-vuln-lab](https://github.com/mahdi-salmanzade/laravel-vuln-lab) still yields all 7 of its planted access-control findings.
+
+**Two finding classes, because certainty and severity are different questions.** Severity answers *"how bad if real"*; it cannot express *"how sure am I"*. Conflating them is how a scanner ships confident nonsense.
+
+- **Confirmed vulnerability** — every link of the evidence chain was resolved from your code: an attacker-controlled source, the sink it reaches, and the absence of a guard on the path. Only these are counted, scored, and allowed to fail a build.
+- **Needs review** — security-sensitive code the scanner *cannot* prove either way, phrased as a question and excluded from the count, the score and the exit code. A review item **never carries a suggested fix.**
+
+That second rule is structural, not a convention: a review finding's fix string is dropped in `Vulnerability`'s constructor, so a detector cannot reintroduce one by forgetting. It exists because this tool has shipped fixes that break applications — advising an ability that a policy never declared, and advising the removal of a `$fillable` column that a multi-tenant app needed to stay tenant-scoped.
+
+**A suggested fix must survive every one of these**, or none is emitted and the finding explains why instead:
+- the finding is a confirmed vulnerability, never a review item;
+- every identifier it names was resolved from the analysed file — policy classes are quoted from the class actually resolved, never synthesised as `{Model}Policy`;
+- every variable it names is **definitely assigned** on all paths to the insertion point, so a binding inside a `try`/`catch`, a `match` arm or a loop body is never named;
+- the method it advises calling is actually callable on that class.
+
+**What we cannot see.** Route middleware registered at runtime, dynamically resolved policies, gates defined in service providers, anything reached via `__call`, and authorization enforced outside the analysed file set. That is exactly why the review class exists.
 
 ### Multi-pass verification (v1.6)
 
@@ -129,7 +160,7 @@ HACK_AUDITOR_AI_MODEL=claude-opus-5
 
 | Flag | What it does |
 |------|-------------|
-| `--path=app/Http/Controllers` | Scan specific directory or file |
+| `--path=app/Http/Controllers` | Scan a specific directory (walks it recursively) or a single file |
 | `--severity=High` | Filter to High+ only |
 | `--fix` | Include fix suggestions |
 | `--json` | JSON output for CI/CD |

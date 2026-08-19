@@ -14,6 +14,7 @@ use Mahdi\HackAuditor\Scanner\Baseline;
 use Mahdi\HackAuditor\Scanner\FileCollector;
 use Mahdi\HackAuditor\Scanner\GitDiffCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
+use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 use Mahdi\HackAuditor\Support\AiProviders;
@@ -135,14 +136,22 @@ final class HackScanCommand extends Command
             return $scanner->scan();
         };
 
-        /** @var VulnerabilityReport $report */
-        if ($this->option('json')) {
-            $report = $scanCallback();
-        } else {
-            $report = spin(
-                callback: $scanCallback,
-                message: 'Analyzing files with AI...',
-            );
+        // Defense in depth: the scanner catches per-chunk failures itself, but a
+        // failure it does NOT catch (a fatal in the spinner, the container, or
+        // future pipeline code) would otherwise discard a tracker that has
+        // already paid for real requests. Record the spend, then rethrow.
+        try {
+            /** @var VulnerabilityReport $report */
+            $report = $this->option('json')
+                ? $scanCallback()
+                : spin(
+                    callback: $scanCallback,
+                    message: 'Analyzing files with AI...',
+                );
+        } catch (\Throwable $e) {
+            $this->logUsage($tracker, null);
+
+            throw $e;
         }
 
         $elapsedMs = (int) ((hrtime(true) - $startTime) / 1_000_000);
@@ -150,15 +159,21 @@ final class HackScanCommand extends Command
         $filteredVulnerabilities = $this->filterBySeverity($report->vulnerabilities, $minimumSeverity);
         $filteredVulnerabilities = $this->applyBaseline($filteredVulnerabilities);
 
+        // Two classes, never mixed: assertions the analyzer can back with an
+        // evidence chain, and questions it wants a human to answer. Only the
+        // first list is counted, scored or allowed to fail the build.
+        $confirmed = $this->onlyConfirmed($filteredVulnerabilities);
+        $reviewItems = $this->onlyReviewItems($filteredVulnerabilities);
+
         // These run before any early return so --json mode still logs and saves
-        $this->logUsage($report);
+        $this->logUsage($tracker, $report);
 
         if ($this->option('save')) {
             $this->saveResults($report, $elapsedMs);
         }
 
         if ($this->option('json')) {
-            return $this->outputJson($report, $filteredVulnerabilities, $elapsedMs);
+            return $this->outputJson($report, $confirmed, $reviewItems, $elapsedMs);
         }
 
         $this->line('  <fg=green>✓</> Scan complete <fg=gray>('.round($elapsedMs / 1000, 1).'s)</>');
@@ -167,23 +182,20 @@ final class HackScanCommand extends Command
 
         $this->displayFileSummary($report);
         $this->newLine();
-        $this->displayScore($report->overallScore);
+        $this->displayCoverage($report);
+        $this->displayScore($report);
         $this->newLine();
         $this->displaySummary($report->summary);
         $this->newLine();
 
-        if (count($filteredVulnerabilities) > 0) {
-            $this->displayVulnerabilityTable($filteredVulnerabilities);
-            $this->newLine();
-            $this->displayDetailedFindings($filteredVulnerabilities);
-            $this->newLine();
-        }
+        $this->displayConfirmedSection($report, $confirmed);
+        $this->displayReviewSection($reviewItems);
 
-        $this->displayStats($report, $filteredVulnerabilities, $minimumSeverity);
+        $this->displayStats($confirmed, $reviewItems, $minimumSeverity);
         $this->newLine();
 
-        if ($this->option('fix') && count($filteredVulnerabilities) > 0) {
-            $this->displayFixes($filteredVulnerabilities);
+        if ($this->option('fix') && count($confirmed) > 0) {
+            $this->displayFixes($confirmed);
             $this->newLine();
         }
 
@@ -201,23 +213,12 @@ final class HackScanCommand extends Command
 
         $this->displayUsageSummary($report);
 
-        if ($report->getFilesSkipped() > 0) {
-            $this->components->warn(
-                "Token limit reached — {$report->getFilesSkipped()} file(s) skipped. "
-                .'Increase with --limit or remove the flag for unlimited.'
-            );
-        }
-
-        $chunksFailedParse = $scanner->getChunksFailedParse();
-        if ($chunksFailedParse > 0) {
-            $this->components->warn(
-                "{$chunksFailedParse} chunk(s) returned unparseable AI responses and were skipped. "
-                .'Re-run the scan to retry those files.'
-            );
-        }
+        $this->displaySkipRemediation($report);
 
         $this->components->info('Run `<fg=cyan>php artisan hack:ctf</>` to generate CTF challenges from these findings');
 
+        // hasCritical() counts CONFIRMED vulnerabilities only, so a review item
+        // can never fail a build no matter how bad it would be if it were real.
         return $report->hasCritical() ? self::FAILURE : self::SUCCESS;
     }
 
@@ -241,7 +242,13 @@ final class HackScanCommand extends Command
     }
 
     /**
-     * Filter vulnerabilities to only include those at or above the minimum severity.
+     * Filter findings to only include those at or above the minimum severity.
+     *
+     * This is a DISPLAY filter over both classes — for a review item severity
+     * means "impact if this turns out to be real", so the same threshold hides
+     * the quiet ones. It is not the build gate: the exit code is decided by
+     * VulnerabilityReport::hasCritical(), which sees confirmed vulnerabilities
+     * only, so no --severity value can ever promote a question into a failure.
      *
      * @param  array<int, Vulnerability>  $vulnerabilities
      * @return array<int, Vulnerability>
@@ -253,6 +260,34 @@ final class HackScanCommand extends Command
         return array_values(array_filter(
             $vulnerabilities,
             fn (Vulnerability $v): bool => (self::SEVERITY_ORDER[$v->severity->value] ?? 0) >= $minimumOrder,
+        ));
+    }
+
+    /**
+     * Keep only the findings the analyzer is asserting.
+     *
+     * @param  array<int, Vulnerability>  $vulnerabilities
+     * @return array<int, Vulnerability>
+     */
+    private function onlyConfirmed(array $vulnerabilities): array
+    {
+        return array_values(array_filter(
+            $vulnerabilities,
+            static fn (Vulnerability $v): bool => $v->isConfirmedVulnerability(),
+        ));
+    }
+
+    /**
+     * Keep only the findings the analyzer is asking about.
+     *
+     * @param  array<int, Vulnerability>  $vulnerabilities
+     * @return array<int, Vulnerability>
+     */
+    private function onlyReviewItems(array $vulnerabilities): array
+    {
+        return array_values(array_filter(
+            $vulnerabilities,
+            static fn (Vulnerability $v): bool => $v->isReviewItem(),
         ));
     }
 
@@ -277,20 +312,145 @@ final class HackScanCommand extends Command
      */
     private function displayFileSummary(VulnerabilityReport $report): void
     {
-        $totalFiles = count($report->vulnerabilities);
+        $confirmed = $report->confirmedVulnerabilities();
+        $findings = count($confirmed);
         $uniqueLocations = count(array_unique(array_map(
             fn (Vulnerability $v): string => $v->location,
-            $report->vulnerabilities,
+            $confirmed,
         )));
 
-        $this->components->info("Found <options=bold>{$totalFiles}</> vulnerabilities across <options=bold>{$uniqueLocations}</> files");
+        // "affected files", not "files" — this counts files with findings, not
+        // files scanned. Sitting next to the coverage line, the old wording
+        // ("0 vulnerabilities across 0 files") read as "0 files were scanned".
+        $this->components->info("Found <options=bold>{$findings}</> vulnerabilities in <options=bold>{$uniqueLocations}</> affected file(s)");
+
+        $reviewCount = $report->reviewCount();
+
+        if ($reviewCount > 0) {
+            $this->line("  <fg=gray>plus</>     <fg=yellow>{$reviewCount}</> item(s) flagged for human review <fg=gray>(not counted as vulnerabilities)</>");
+        }
     }
 
     /**
-     * Display the overall security score with color-coded formatting.
+     * Display scan coverage, naming every file that was NOT analysed.
+     *
+     * A count alone ("1 chunk(s) were skipped") is unusable: the reader cannot
+     * tell whether the gap covers a README or the payments controller. Every
+     * unanalysed file is listed by path with the reason it was skipped.
      */
-    private function displayScore(int $score): void
+    private function displayCoverage(VulnerabilityReport $report): void
     {
+        $coverage = $report->getCoverage();
+
+        if ($coverage === null) {
+            return;
+        }
+
+        if ($coverage->isComplete()) {
+            $this->line(sprintf(
+                '  <fg=gray>coverage</>  <fg=green>%d/%d files analyzed (100%%)</>',
+                $coverage->filesAnalyzed,
+                $coverage->filesDiscovered,
+            ));
+            $this->newLine();
+
+            return;
+        }
+
+        if ($coverage->filesDiscovered === 0) {
+            $this->line('  <fg=gray>coverage</>  <fg=yellow>0 files discovered — nothing was analyzed</>');
+            $this->newLine();
+
+            return;
+        }
+
+        $this->line(sprintf(
+            '  <fg=gray>coverage</>  <fg=red;options=bold>%d/%d files analyzed (%s%%) — INCOMPLETE</>',
+            $coverage->filesAnalyzed,
+            $coverage->filesDiscovered,
+            $coverage->percent(),
+        ));
+        $this->newLine();
+
+        $this->components->warn(sprintf(
+            '%d file(s) were NOT analyzed. Findings below cannot be treated as complete.',
+            $coverage->filesSkipped(),
+        ));
+
+        foreach ($coverage->skippedByReason() as $reason => $paths) {
+            $this->line('  <fg=yellow>'.ucfirst(ScanCoverage::reasonLabel($reason)).':</>');
+
+            foreach ($paths as $path) {
+                $this->line("    <fg=gray>-</> <fg=cyan>{$path}</>");
+            }
+        }
+
+        $this->newLine();
+    }
+
+    /**
+     * Tell the user how to close each kind of coverage gap.
+     *
+     * Grouped by reason so the remediation matches the cause: a token-budget
+     * skip needs a bigger --limit, an unparseable AI response needs a re-run.
+     */
+    private function displaySkipRemediation(VulnerabilityReport $report): void
+    {
+        $coverage = $report->getCoverage();
+
+        if ($coverage === null || $coverage->skipped === []) {
+            return;
+        }
+
+        foreach ($coverage->skippedByReason() as $reason => $paths) {
+            $count = count($paths);
+
+            $remediation = match ($reason) {
+                ScanCoverage::REASON_TOKEN_LIMIT => 'Increase with --limit or remove the flag for unlimited.',
+                ScanCoverage::REASON_AI_FAILURE => 'Re-run the scan to retry those files.',
+                default => 'Re-run the scan.',
+            };
+
+            $this->components->warn(sprintf(
+                '%d file(s) skipped — %s. %s',
+                $count,
+                ScanCoverage::reasonLabel($reason),
+                $remediation,
+            ));
+        }
+    }
+
+    /**
+     * Display the overall security score, or withhold it when coverage is
+     * incomplete or nothing was analysed.
+     *
+     * The score is penalty-only — it starts at 100 and drops per finding — so an
+     * empty scan used to print a flawless 100/100. A score that rewards scanning
+     * nothing is worse than no score, so it is suppressed rather than shown.
+     */
+    private function displayScore(VulnerabilityReport $report): void
+    {
+        if (! $report->scoreIsMeaningful()) {
+            $this->line('  <fg=yellow;options=bold>╔═══════════════════════╗</>');
+            $this->line('  <fg=yellow;options=bold>║   Security Score      ║</>');
+            $this->line('  <fg=yellow;options=bold>║     not available     ║</>');
+            $this->line('  <fg=yellow;options=bold>╚═══════════════════════╝</>');
+
+            $reason = $report->scoreSuppressionReason();
+
+            if ($reason !== null) {
+                $this->newLine();
+
+                foreach (explode("\n", wordwrap($reason, 100)) as $line) {
+                    $this->line("  <fg=gray>{$line}</>");
+                }
+            }
+
+            return;
+        }
+
+        $score = $report->overallScore;
+
         $color = match (true) {
             $score > 80 => 'green',
             $score > 50 => 'yellow',
@@ -323,6 +483,98 @@ final class HackScanCommand extends Command
                 $this->newLine();
             }
         }
+    }
+
+    /**
+     * Render the first of the two sections: findings the analyzer asserts.
+     *
+     * When this section is empty it says so plainly and immediately states what
+     * was analysed. "0 confirmed vulnerabilities" is a statement about the
+     * evidence, not a clean bill of health, and the coverage line is what stops
+     * a reader from reading it as one.
+     *
+     * @param  array<int, Vulnerability>  $confirmed
+     */
+    private function displayConfirmedSection(VulnerabilityReport $report, array $confirmed): void
+    {
+        $count = count($confirmed);
+
+        $this->line("  <fg=red;options=bold>━━━ Confirmed vulnerabilities ({$count}) ━━━</>");
+        $this->line('  <fg=gray>Asserted findings: a source, a sink and an unguarded path between them were resolved.</>');
+        $this->newLine();
+
+        if ($count === 0) {
+            $this->line('  <fg=green>No confirmed vulnerabilities.</> <fg=gray>Nothing below was proven exploitable.</>');
+
+            foreach (explode("\n", wordwrap($report->coverageStatement(), 100)) as $line) {
+                $this->line("  <fg=gray>{$line}</>");
+            }
+
+            $this->newLine();
+
+            return;
+        }
+
+        $this->displayVulnerabilityTable($confirmed);
+        $this->newLine();
+        $this->displayDetailedFindings($confirmed);
+        $this->newLine();
+    }
+
+    /**
+     * Render the second section: questions for a human, never assertions.
+     *
+     * Every line here is phrased as a question and no fix is ever printed —
+     * a suggested fix implies a diagnosis, and this section exists precisely
+     * because the analyzer could not make one.
+     *
+     * @param  array<int, Vulnerability>  $reviewItems
+     */
+    private function displayReviewSection(array $reviewItems): void
+    {
+        $count = count($reviewItems);
+
+        $this->line("  <fg=yellow;options=bold>━━━ Needs review ({$count}) ━━━</>");
+        $this->line('  <fg=gray>NOT vulnerabilities. Security-sensitive code the analyzer could not clear or condemn.</>');
+        $this->line('  <fg=gray>Excluded from the count, the score and the exit code. No fixes are suggested for these.</>');
+        $this->newLine();
+
+        if ($count === 0) {
+            $this->line('  <fg=gray>Nothing was flagged for review.</>');
+            $this->newLine();
+
+            return;
+        }
+
+        foreach ($this->sortBySeverity($reviewItems) as $index => $item) {
+            $number = $index + 1;
+
+            $this->line("  <fg=yellow>?</> <options=bold>#{$number} {$item->type->label()}</> <fg=cyan>{$item->location}:{$item->line}</>");
+            $this->line("    <fg=gray>Impact if real:</> {$item->severity->label()}  <fg=gray>Confidence:</> <fg=yellow>{$item->confidence->label()}</>");
+
+            foreach (explode("\n", wordwrap($this->asQuestion($item->description), 96)) as $line) {
+                $this->line("    <fg=gray>{$line}</>");
+            }
+
+            $this->newLine();
+        }
+    }
+
+    /**
+     * Phrase a review item as the question it is.
+     *
+     * Detectors are expected to write these as questions already; this is a
+     * guard for the ones that slip through with an assertion's voice.
+     */
+    private function asQuestion(string $description): string
+    {
+        $trimmed = trim($description);
+
+        if ($trimmed === '' || str_contains($trimmed, '?')) {
+            return $trimmed;
+        }
+
+        return 'Worth checking: '.$trimmed;
     }
 
     /**
@@ -387,16 +639,21 @@ final class HackScanCommand extends Command
     /**
      * Display the statistics summary line.
      *
-     * @param  array<int, Vulnerability>  $filteredVulnerabilities
+     * The severity breakdown covers CONFIRMED vulnerabilities only. Review
+     * items get their own total on a separate line so they can never pad the
+     * headline number.
+     *
+     * @param  array<int, Vulnerability>  $confirmed
+     * @param  array<int, Vulnerability>  $reviewItems
      */
-    private function displayStats(VulnerabilityReport $report, array $filteredVulnerabilities, SeverityLevel $minimum): void
+    private function displayStats(array $confirmed, array $reviewItems, SeverityLevel $minimum): void
     {
-        $total = count($filteredVulnerabilities);
+        $total = count($confirmed);
 
-        $critical = count(array_filter($filteredVulnerabilities, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Critical));
-        $high = count(array_filter($filteredVulnerabilities, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::High));
-        $medium = count(array_filter($filteredVulnerabilities, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Medium));
-        $low = count(array_filter($filteredVulnerabilities, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Low));
+        $critical = count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Critical));
+        $high = count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::High));
+        $medium = count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Medium));
+        $low = count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Low));
 
         $statsLine = "  Found <options=bold>{$total}</> vulnerabilities";
 
@@ -411,16 +668,35 @@ final class HackScanCommand extends Command
         $statsLine .= "<fg=gray>{$low} Low</>";
 
         $this->line($statsLine);
+
+        $reviewCount = count($reviewItems);
+
+        if ($reviewCount > 0) {
+            $this->line("  <fg=yellow>{$reviewCount}</> item(s) need review <fg=gray>(not counted above; they do not affect the score or the exit code)</>");
+        }
     }
 
     /**
      * Display fix suggestions for each vulnerability in styled code blocks.
      *
+     * Confirmed vulnerabilities only, and only those that actually carry a fix.
+     * A finding with no fix prints nothing rather than an empty code block —
+     * a missing fix is fine, an invented one is a catastrophe.
+     *
      * @param  array<int, Vulnerability>  $vulnerabilities
      */
     private function displayFixes(array $vulnerabilities): void
     {
-        $sorted = $this->sortBySeverity($vulnerabilities);
+        $withFixes = array_values(array_filter(
+            $vulnerabilities,
+            static fn (Vulnerability $v): bool => $v->isConfirmedVulnerability() && $v->hasFix(),
+        ));
+
+        if ($withFixes === []) {
+            return;
+        }
+
+        $sorted = $this->sortBySeverity($withFixes);
 
         $this->components->info('Suggested Fixes');
         $this->newLine();
@@ -445,25 +721,39 @@ final class HackScanCommand extends Command
     /**
      * Output the full report as JSON and return the exit code.
      *
-     * @param  array<int, Vulnerability>  $filteredVulnerabilities
+     * `vulnerabilities` carries assertions only; questions live under
+     * `review_items` so an existing consumer that counts `vulnerabilities`
+     * cannot be handed a number inflated by things nobody proved.
+     *
+     * @param  array<int, Vulnerability>  $confirmed
+     * @param  array<int, Vulnerability>  $reviewItems
      */
-    private function outputJson(VulnerabilityReport $report, array $filteredVulnerabilities, int $elapsedMs): int
+    private function outputJson(VulnerabilityReport $report, array $confirmed, array $reviewItems, int $elapsedMs): int
     {
         $output = [
-            'overall_score' => $report->overallScore,
+            'overall_score' => $report->scoreIsMeaningful() ? $report->overallScore : null,
+            'score_suppressed' => ! $report->scoreIsMeaningful(),
+            'score_suppression_reason' => $report->scoreSuppressionReason(),
+            'coverage' => $report->getCoverage()?->toArray(),
+            'coverage_statement' => $report->coverageStatement(),
             'summary' => $report->summary,
             'ctf_idea' => $report->ctfIdea,
             'scan_duration_ms' => $elapsedMs,
             'counts' => [
-                'total' => count($filteredVulnerabilities),
-                'critical' => count(array_filter($filteredVulnerabilities, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Critical)),
-                'high' => count(array_filter($filteredVulnerabilities, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::High)),
-                'medium' => count(array_filter($filteredVulnerabilities, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Medium)),
-                'low' => count(array_filter($filteredVulnerabilities, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Low)),
+                'total' => count($confirmed),
+                'critical' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Critical)),
+                'high' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::High)),
+                'medium' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Medium)),
+                'low' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Low)),
+                'review' => count($reviewItems),
             ],
             'vulnerabilities' => array_map(
                 fn (Vulnerability $v): array => $v->toArray(),
-                $filteredVulnerabilities,
+                $confirmed,
+            ),
+            'review_items' => array_map(
+                fn (Vulnerability $v): array => $v->toArray(),
+                $reviewItems,
             ),
         ];
 
@@ -528,23 +818,42 @@ final class HackScanCommand extends Command
         $files = $collector->getChangedFiles($baseBranch);
 
         if ($files === []) {
-            return new VulnerabilityReport(
+            $report = new VulnerabilityReport(
                 vulnerabilities: [],
                 overallScore: 100,
                 summary: "No changed PHP files found compared to {$baseBranch}.",
                 ctfIdea: '',
             );
+            $report->setCoverage(ScanCoverage::none());
+
+            return $report;
         }
 
         // Use scanFile for each changed file so it goes through the full
         // HackScanner pipeline (route context, routed methods, form requests,
         // model context) instead of bypassing it with raw PromptBuilder calls.
         $reports = [];
+        $filesAnalyzed = 0;
+        $skipped = [];
 
         foreach ($files as $filePath) {
             try {
-                $reports[] = $scanner->scanFile($filePath);
+                $fileReport = $scanner->scanFile($filePath);
+                $reports[] = $fileReport;
+
+                $fileCoverage = $fileReport->getCoverage();
+
+                if ($fileCoverage === null) {
+                    $filesAnalyzed++;
+
+                    continue;
+                }
+
+                $filesAnalyzed += $fileCoverage->filesAnalyzed;
+                $skipped = array_merge($skipped, $fileCoverage->skipped);
             } catch (\Throwable $e) {
+                $skipped[] = ['path' => $filePath, 'reason' => ScanCoverage::REASON_AI_FAILURE];
+
                 Log::warning('[HackAuditor] Skipping diff file due to scan failure', [
                     'file' => $filePath,
                     'error' => $e->getMessage(),
@@ -552,17 +861,22 @@ final class HackScanCommand extends Command
             }
         }
 
+        $coverage = new ScanCoverage(
+            filesDiscovered: count($files),
+            filesAnalyzed: $filesAnalyzed,
+            skipped: $skipped,
+        );
+
         if (count($reports) === 0) {
-            return new VulnerabilityReport(
+            $report = new VulnerabilityReport(
                 vulnerabilities: [],
                 overallScore: 100,
                 summary: 'No files analyzed.',
                 ctfIdea: '',
             );
-        }
+            $report->setCoverage($coverage);
 
-        if (count($reports) === 1) {
-            return $reports[0];
+            return $report;
         }
 
         // Merge reports
@@ -579,12 +893,22 @@ final class HackScanCommand extends Command
             }
         }
 
-        return new VulnerabilityReport(
+        $merged = new VulnerabilityReport(
             vulnerabilities: $allVulns,
             overallScore: (int) round($scoreSum / count($reports)),
             summary: implode("\n\n", $summaries),
             ctfIdea: '',
         );
+
+        $tracker = $reports[0]->getUsageTracker();
+
+        if ($tracker !== null) {
+            $merged->setUsageTracker($tracker);
+        }
+
+        $merged->setCoverage($coverage);
+
+        return $merged;
     }
 
     /**
@@ -628,7 +952,7 @@ final class HackScanCommand extends Command
         $baselinePath = config('hack-auditor.scan.baseline_path');
         $baseline->save($report, is_string($baselinePath) ? $baselinePath : null);
 
-        $this->components->info("Baseline updated with {$report->totalCount()} findings");
+        $this->components->info("Baseline updated with {$report->allFindingsCount()} findings");
     }
 
     /**
@@ -678,7 +1002,13 @@ final class HackScanCommand extends Command
                 return;
             }
 
-            $previousScore = (int) ($previous['overall_score'] ?? 0);
+            // A suppressed score on either side makes the delta meaningless —
+            // comparing "no score" against a number invents a trend.
+            if (! $report->scoreIsMeaningful() || ! isset($previous['overall_score'])) {
+                return;
+            }
+
+            $previousScore = (int) $previous['overall_score'];
             $delta = $report->overallScore - $previousScore;
             $deltaSign = $delta > 0 ? '+' : '';
             $deltaColor = $delta > 0 ? 'green' : ($delta < 0 ? 'red' : 'gray');
@@ -692,20 +1022,39 @@ final class HackScanCommand extends Command
 
     /**
      * Log usage data to the filesystem usage log.
+     *
+     * Reads the tracker the command handed to the scanner rather than the one
+     * attached to the report. The tracker is the authoritative record of spend:
+     * it is mutated in place by every AI request, so it survives report
+     * rebuilds, partial chunk failures and an outright crash. A null report
+     * means the scan aborted after spending.
      */
-    private function logUsage(VulnerabilityReport $report): void
+    private function logUsage(UsageTracker $tracker, ?VulnerabilityReport $report): void
     {
-        if (! config('hack-auditor.usage.log_enabled', true) || ! $report->hasUsageData()) {
+        if (! config('hack-auditor.usage.log_enabled', true)) {
+            return;
+        }
+
+        $spent = $tracker->getRequests() > 0
+            || $tracker->getVerificationRequests() > 0
+            || $tracker->totalTokens() > 0;
+
+        if (! $spent) {
             return;
         }
 
         try {
             $usageLog = new UsageLog;
             $detectedPricing = AiProviders::detectPricing();
-            $usageLog->record($report->getUsageTracker(), [
-                'files_skipped' => $report->getFilesSkipped(),
+            $coverage = $report?->getCoverage();
+
+            $usageLog->record($tracker, [
+                'files_scanned' => $coverage?->filesAnalyzed,
+                'files_skipped' => $report?->getFilesSkipped() ?? 0,
+                'coverage_complete' => $coverage?->isComplete(),
+                'aborted' => $report === null,
                 'path' => is_string($this->option('path')) ? $this->option('path') : null,
-                'score' => $report->overallScore,
+                'score' => ($report !== null && $report->scoreIsMeaningful()) ? $report->overallScore : null,
                 'provider' => $detectedPricing['provider'],
                 'model' => $detectedPricing['model'],
             ]);

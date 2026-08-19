@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Report;
 
 use Illuminate\Support\Facades\File;
+use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 
@@ -39,9 +40,19 @@ class HtmlReportGenerator
         $totalFiles = $meta['total_files'] ?? $this->countUniqueFiles($report);
         $provider = $this->resolveProvider($meta);
 
+        $scoreIsMeaningful = $report->scoreIsMeaningful();
         $score = $report->overallScore;
-        $scoreColor = $this->scoreColor($score, $report->criticalCount());
-        $strokeOffset = self::RING_CIRCUMFERENCE * (1 - $score / 100);
+
+        // A penalty-only score over an empty or partial scan is not evidence.
+        // Withhold the number rather than publish a figure the coverage cannot
+        // support — an empty ring reads as "unknown", not "perfect".
+        $scoreLabel = $scoreIsMeaningful ? (string) $score : 'n/a';
+        $scoreColor = $scoreIsMeaningful
+            ? $this->scoreColor($score, $report->criticalCount())
+            : '#94a3b8';
+        $strokeOffset = $scoreIsMeaningful
+            ? self::RING_CIRCUMFERENCE * (1 - $score / 100)
+            : self::RING_CIRCUMFERENCE;
 
         $findingsHtml = $this->buildFindingsHtml($report);
         $usageHtml = $this->buildUsageHtml($report);
@@ -49,7 +60,7 @@ class HtmlReportGenerator
         $stub = File::get($this->stubPath());
 
         $replacements = [
-            '{{SCORE}}' => (string) $score,
+            '{{SCORE}}' => $scoreLabel,
             '{{SCORE_COLOR}}' => $scoreColor,
             '{{STROKE_OFFSET}}' => number_format($strokeOffset, 3, '.', ''),
             '{{CRITICAL_COUNT}}' => (string) $report->criticalCount(),
@@ -57,11 +68,12 @@ class HtmlReportGenerator
             '{{MEDIUM_COUNT}}' => (string) $report->mediumCount(),
             '{{LOW_COUNT}}' => (string) $report->lowCount(),
             '{{TOTAL_COUNT}}' => (string) $report->totalCount(),
+            '{{REVIEW_COUNT}}' => (string) $report->reviewCount(),
             '{{SCANNED_AT}}' => $this->escape($scannedAt),
             '{{DURATION}}' => $this->escape($duration),
             '{{TOTAL_FILES}}' => (string) $totalFiles,
             '{{PROVIDER}}' => $this->escape($provider),
-            '{{SUMMARY}}' => $this->buildSummaryHtml($report->summary),
+            '{{SUMMARY}}' => $this->buildCoverageHtml($report).$this->buildSummaryHtml($report->summary),
             '{{FINDINGS}}' => $findingsHtml,
             '{{USAGE_SECTION}}' => $usageHtml,
         ];
@@ -92,6 +104,42 @@ class HtmlReportGenerator
             $score < 80 => '#eab308',
             default => '#22c55e',
         };
+    }
+
+    /**
+     * Build the coverage banner shown above the summary.
+     *
+     * Returns an empty string for a complete scan. When files went unanalysed
+     * the banner names every one of them, so a reader can never mistake a
+     * partial report for a full audit.
+     */
+    private function buildCoverageHtml(VulnerabilityReport $report): string
+    {
+        $coverage = $report->getCoverage();
+
+        if ($coverage === null || $coverage->isComplete()) {
+            return '';
+        }
+
+        $html = '<p><strong>Incomplete scan — '.$this->escape($coverage->describe()).'</strong></p>';
+
+        $reason = $report->scoreSuppressionReason();
+
+        if ($reason !== null) {
+            $html .= '<p>'.$this->escape($reason).'</p>';
+        }
+
+        foreach ($coverage->skippedByReason() as $skipReason => $paths) {
+            $html .= '<p>'.$this->escape(ucfirst(ScanCoverage::reasonLabel($skipReason))).':</p><ul>';
+
+            foreach ($paths as $path) {
+                $html .= '<li><code>'.$this->escape($path).'</code></li>';
+            }
+
+            $html .= '</ul>';
+        }
+
+        return $html;
     }
 
     /**
@@ -196,23 +244,43 @@ class HtmlReportGenerator
     }
 
     /**
-     * Build the HTML for all finding cards, sorted by severity (Critical first).
+     * Build the findings body: confirmed vulnerabilities first, then the
+     * questions the analyzer wants a human to answer.
      *
-     * Inserts severity group dividers when the severity level changes.
+     * The two sections are visually distinct and worded differently on purpose.
+     * The first makes claims; the second asks. Merging them into one list is
+     * what let unproven findings be read — and acted on — as vulnerabilities.
      */
     private function buildFindingsHtml(VulnerabilityReport $report): string
     {
-        $vulnerabilities = $report->vulnerabilities;
+        return $this->buildConfirmedSection($report)
+            ."\n"
+            .$this->buildReviewSection($report);
+    }
 
-        usort($vulnerabilities, function (Vulnerability $a, Vulnerability $b): int {
-            $orderA = self::SEVERITY_ORDER[$a->severity->value] ?? 99;
-            $orderB = self::SEVERITY_ORDER[$b->severity->value] ?? 99;
+    /**
+     * Build the "Confirmed vulnerabilities" section.
+     *
+     * When it is empty the section states what was analysed rather than
+     * implying the code is clean: a zero here measures coverage, not safety.
+     */
+    private function buildConfirmedSection(VulnerabilityReport $report): string
+    {
+        $vulnerabilities = $this->sortedBySeverity($report->confirmedVulnerabilities());
+        $count = count($vulnerabilities);
 
-            return $orderA <=> $orderB;
-        });
+        $heading = <<<HTML
+        <div class="class-heading" style="margin:8px 0 4px;font-size:13px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#ef4444">Confirmed vulnerabilities ({$count})</div>
+        <div class="class-note" style="margin-bottom:14px;font-size:12px;line-height:1.6;opacity:0.75">Asserted findings — a source, a sink and an unguarded path between them were resolved in the analysed code.</div>
+        HTML;
 
-        if ($vulnerabilities === []) {
-            return '<div class="no-findings">No vulnerabilities found.</div>';
+        if ($count === 0) {
+            $statement = $this->escape($report->coverageStatement());
+
+            return $heading."\n"
+                .'<div class="no-findings">No vulnerabilities found. '
+                .'<span style="display:block;margin-top:6px;font-size:12px;opacity:0.75">'.$statement.'</span>'
+                .'</div>';
         }
 
         // Group vulnerabilities by severity to build counts and dividers.
@@ -222,7 +290,7 @@ class HtmlReportGenerator
             $grouped[$vulnerability->severity->value][] = $vulnerability;
         }
 
-        $cards = [];
+        $cards = [$heading];
 
         $previousSeverity = null;
 
@@ -230,11 +298,11 @@ class HtmlReportGenerator
             $currentSeverity = $vulnerability->severity->value;
 
             if ($currentSeverity !== $previousSeverity) {
-                $count = count($grouped[$currentSeverity]);
+                $severityCount = count($grouped[$currentSeverity]);
                 $label = strtoupper($vulnerability->severity->name);
                 $cards[] = <<<HTML
                 <div class="severity-divider severity-{$currentSeverity}">
-                  <span>{$label} ({$count})</span>
+                  <span>{$label} ({$severityCount})</span>
                 </div>
                 HTML;
                 $previousSeverity = $currentSeverity;
@@ -244,6 +312,95 @@ class HtmlReportGenerator
         }
 
         return implode("\n", $cards);
+    }
+
+    /**
+     * Build the "Needs review" section.
+     *
+     * Review items render as questions with no fix block at all — the fix
+     * string is already empty by construction, and printing an empty
+     * "Recommended Fix" panel would invite someone to fill it in.
+     */
+    private function buildReviewSection(VulnerabilityReport $report): string
+    {
+        $items = $this->sortedBySeverity($report->reviewItems());
+        $count = count($items);
+
+        $html = <<<HTML
+        <div class="class-heading" style="margin:28px 0 4px;padding-top:20px;border-top:1px dashed rgba(148,163,184,0.4);font-size:13px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#eab308">Needs review ({$count})</div>
+        <div class="class-note" style="margin-bottom:14px;font-size:12px;line-height:1.6;opacity:0.75">Not vulnerabilities. Security-sensitive code the analyzer could neither clear nor condemn, so it asks instead of asserting. These are excluded from the counts, the score and the exit code, and no fix is suggested for them.</div>
+        HTML;
+
+        if ($items === []) {
+            return $html."\n".'<div class="no-findings">Nothing was flagged for review.</div>';
+        }
+
+        foreach ($items as $item) {
+            $html .= "\n".$this->buildReviewCard($item);
+        }
+
+        return $html;
+    }
+
+    /**
+     * Render one review item as a question card.
+     */
+    private function buildReviewCard(Vulnerability $item): string
+    {
+        $typeLabel = $this->escape($item->type->label());
+        $location = $this->escape($item->location);
+        $line = (string) $item->line;
+        $severity = $this->escape(strtoupper($item->severity->name));
+        $confidence = $this->escape($item->confidence->value);
+        $description = $this->escape($item->description);
+        $proof = $this->escape($item->proof);
+
+        $proofBlock = $proof === '' ? '' : <<<HTML
+        <div class="code-section">
+          <div class="code-label">Code in question</div>
+          <div class="code-block"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$proof}</code></pre></div>
+        </div>
+        HTML;
+
+        return <<<HTML
+        <div class="finding-card review-card" data-expanded="false" style="border-left:3px dashed #eab308">
+          <div class="finding-header" onclick="toggleCard(this)">
+            <div class="finding-row-top">
+              <span class="severity-badge" style="background:#eab308;color:#1c1917">REVIEW</span>
+              <span class="finding-type">{$typeLabel}</span>
+              <span class="toggle-icon">&#9654;</span>
+            </div>
+            <div class="finding-row-bottom">
+              <span class="finding-location">{$location}:{$line}</span>
+              <span class="owasp-tag" title="Impact if this turns out to be real">if real: {$severity}</span>
+              <span class="owasp-tag" title="How much of the evidence chain was resolved">confidence: {$confidence}</span>
+            </div>
+          </div>
+          <div class="finding-body">
+            <p class="finding-description">{$description}</p>
+            {$proofBlock}
+            <p class="finding-description" style="opacity:0.75;font-size:12px">No fix is suggested: the analyzer did not resolve the evidence that would justify one. A human decides whether this is a problem.</p>
+          </div>
+        </div>
+        HTML;
+    }
+
+    /**
+     * Sort findings by severity, Critical first.
+     *
+     * @param  array<int, Vulnerability>  $findings
+     * @return array<int, Vulnerability>
+     */
+    private function sortedBySeverity(array $findings): array
+    {
+        usort($findings, function (Vulnerability $a, Vulnerability $b): int {
+            $orderA = self::SEVERITY_ORDER[$a->severity->value] ?? 99;
+            $orderB = self::SEVERITY_ORDER[$b->severity->value] ?? 99;
+
+            return $orderA <=> $orderB;
+        });
+
+        return $findings;
     }
 
     /**
@@ -260,9 +417,9 @@ class HtmlReportGenerator
         $shortOwasp = $this->escape($this->truncateOwasp($vulnerability->type->owaspCategory()));
         $description = $this->escape($vulnerability->description);
         $proof = $this->escape($vulnerability->proof);
-        $fix = $this->escape($vulnerability->fix);
         $verificationBadge = $this->buildVerificationBadge($vulnerability);
         $exploitBlock = $this->buildExploitBlock($vulnerability);
+        $fixBlock = $this->buildFixBlock($vulnerability);
 
         return <<<HTML
         <div class="finding-card severity-{$severityValue}" data-expanded="false">
@@ -285,11 +442,32 @@ class HtmlReportGenerator
               <div class="code-label vulnerable-label">Vulnerable Code</div>
               <div class="code-block vulnerable-code"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$proof}</code></pre></div>
             </div>
-            <div class="code-section">
-              <div class="code-label fix-label">Recommended Fix</div>
-              <div class="code-block fix-code"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$fix}</code></pre></div>
-            </div>
+            {$fixBlock}
           </div>
+        </div>
+        HTML;
+    }
+
+    /**
+     * Render the recommended-fix panel, or nothing when there is no fix.
+     *
+     * An empty "Recommended Fix" code block is an invitation to invent one.
+     * Findings that could not justify a fix say so in words instead.
+     */
+    private function buildFixBlock(Vulnerability $vulnerability): string
+    {
+        if (! $vulnerability->hasFix()) {
+            return '<p class="finding-description" style="opacity:0.75;font-size:12px">'
+                .'No fix is suggested for this finding: the analyzer could not resolve every identifier a fix would have to name.'
+                .'</p>';
+        }
+
+        $fix = $this->escape($vulnerability->fix);
+
+        return <<<HTML
+        <div class="code-section">
+          <div class="code-label fix-label">Recommended Fix</div>
+          <div class="code-block fix-code"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$fix}</code></pre></div>
         </div>
         HTML;
     }

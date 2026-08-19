@@ -83,12 +83,18 @@ final class HackCTFCommand extends Command
         }
 
         $createdAt = $latestScan['created_at'] ?? 'Unknown';
-        $score = (int) ($latestScan['overall_score'] ?? 0);
         $totalVulns = (int) ($latestScan['counts']['total'] ?? count($latestScan['vulnerabilities'] ?? []));
+
+        // A saved scan whose score was suppressed stores null, not a number.
+        // Rendering that as "0/100" would invent a failing grade from a scan
+        // that simply did not cover enough ground to grade.
+        $score = isset($latestScan['overall_score'])
+            ? (int) $latestScan['overall_score'].'/100'
+            : 'n/a (incomplete coverage)';
 
         $this->components->info(
             "Loading scan from <options=bold>{$createdAt}</>"
-            ." — Score: <options=bold>{$score}/100</>"
+            ." — Score: <options=bold>{$score}</>"
             ." — <options=bold>{$totalVulns}</> vulnerabilities",
         );
         $this->newLine();

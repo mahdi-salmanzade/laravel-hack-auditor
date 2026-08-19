@@ -85,9 +85,12 @@ final class ShareHelper
         }
 
         $topFinding = '';
+        $confirmed = $report->confirmedVulnerabilities();
 
-        if (count($report->vulnerabilities) > 0) {
-            $topFinding = $report->vulnerabilities[0]->description;
+        // Confirmed vulnerabilities only. Broadcasting a review item as "the
+        // top finding" publishes a question as if it were a verdict.
+        if (count($confirmed) > 0) {
+            $topFinding = $confirmed[0]->description;
         }
 
         try {

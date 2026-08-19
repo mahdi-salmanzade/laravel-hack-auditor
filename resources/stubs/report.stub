@@ -899,7 +899,8 @@ body {
         <div class="findings-header">
             <div class="section-heading" style="margin-bottom:0">Findings</div>
             <div style="display:flex;align-items:center;gap:12px">
-                <span class="findings-count">{{TOTAL_COUNT}} issues</span>
+                <span class="findings-count">{{TOTAL_COUNT}} confirmed</span>
+                <span class="findings-count">{{REVIEW_COUNT}} need review</span>
                 <button class="expand-btn ai-copy-btn" onclick="copyForAI()" id="aiCopyBtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>Copy for AI</button>
                 <button class="expand-btn" onclick="toggleAll()" id="toggleAllBtn">Expand All</button>
             </div>

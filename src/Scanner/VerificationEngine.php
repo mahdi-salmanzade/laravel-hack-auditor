@@ -87,6 +87,10 @@ final class VerificationEngine
      */
     private function isInScope(Vulnerability $vuln): bool
     {
+        if (! $vuln->isConfirmedVulnerability()) {
+            return false;
+        }
+
         return $vuln->severity === SeverityLevel::Critical
             || $vuln->severity === SeverityLevel::High;
     }
@@ -108,6 +112,8 @@ final class VerificationEngine
             exploitVerified: true,
             exploitProof: $exploit,
             originalSeverity: null,
+            findingClass: $vuln->findingClass,
+            confidence: $vuln->confidence,
         );
     }
 
@@ -137,6 +143,8 @@ final class VerificationEngine
             exploitVerified: false,
             exploitProof: null,
             originalSeverity: $vuln->severity,
+            findingClass: $vuln->findingClass,
+            confidence: $vuln->confidence,
         );
     }
 }

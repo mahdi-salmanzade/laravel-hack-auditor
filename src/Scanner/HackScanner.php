@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\Scanner;
 
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Mahdi\HackAuditor\AI\AIAdapter;
 use Mahdi\HackAuditor\AI\PromptBuilder;
@@ -11,6 +12,9 @@ use Mahdi\HackAuditor\AI\ResponseParser;
 use Mahdi\HackAuditor\Contracts\ScannerInterface;
 use Mahdi\HackAuditor\Scanner\AccessControl\AccessControlAnalyzer;
 use Mahdi\HackAuditor\Scanner\AccessControl\AccessControlContext;
+use Mahdi\HackAuditor\Scanner\Php\PhpAstParser;
+use Mahdi\HackAuditor\Scanner\Php\PolicyInspector;
+use Mahdi\HackAuditor\Scanner\Php\TypeNames;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\UsageTracker;
 use SplFileInfo;
@@ -41,6 +45,13 @@ final class HackScanner implements ScannerInterface
 
     private int $chunksFailedParse = 0;
 
+    private int $filesDiscovered = 0;
+
+    private int $filesAnalyzed = 0;
+
+    /** @var array<int, array{path: string, reason: string}> */
+    private array $skippedFiles = [];
+
     private bool $verify = false;
 
     /**
@@ -63,8 +74,7 @@ final class HackScanner implements ScannerInterface
     public function setUsageTracker(UsageTracker $tracker): void
     {
         $this->usageTracker = $tracker;
-        $this->filesSkipped = 0;
-        $this->chunksFailedParse = 0;
+        $this->resetCoverage();
     }
 
     /**
@@ -76,6 +86,18 @@ final class HackScanner implements ScannerInterface
     }
 
     /**
+     * Get the coverage record for the most recent scan.
+     */
+    public function getCoverage(): ScanCoverage
+    {
+        return new ScanCoverage(
+            filesDiscovered: $this->filesDiscovered,
+            filesAnalyzed: $this->filesAnalyzed,
+            skipped: $this->skippedFiles,
+        );
+    }
+
+    /**
      * Scan the entire application for security vulnerabilities.
      *
      * Collects files from configured paths, chunks them for batched AI analysis,
@@ -84,58 +106,56 @@ final class HackScanner implements ScannerInterface
      */
     public function scan(): VulnerabilityReport
     {
-        $files = $this->fileCollector->collect();
+        $this->resetCoverage();
 
-        if ($files->isEmpty()) {
-            return new VulnerabilityReport(
-                vulnerabilities: [],
-                overallScore: 100,
-                summary: 'No files found to scan.',
-                ctfIdea: '',
-            );
-        }
-
-        $chunks = $this->codeExtractor->chunk($files);
-
-        // Collect context once using all controller files from all chunks
-        $this->collectAppContext($chunks);
-
-        $report = $this->scanChunks($chunks);
-
-        $flatFiles = [];
-        foreach ($chunks as $chunk) {
-            foreach ($chunk as $file) {
-                $flatFiles[] = $file;
-            }
-        }
-
-        return $this->mergeAccessControlFindings($report, $flatFiles);
+        return $this->scanCollection(
+            $this->fileCollector->collect(),
+            'No files found to scan.',
+        );
     }
 
     /**
-     * Scan a specific file for security vulnerabilities.
+     * Scan a specific file — or an entire directory — for vulnerabilities.
+     *
+     * `--path` has always advertised "a specific file or directory", but a
+     * directory used to fall straight through to the single-file read path:
+     * file_exists() is true for directories, and CodeExtractor returns empty
+     * content for one. The result was a full-price AI request over an empty
+     * file and a confident, evidence-free report. Directories now walk their
+     * contents through the same collector, chunking and coverage accounting as
+     * a full scan.
      */
     public function scanFile(string $path): VulnerabilityReport
     {
+        $this->resetCoverage();
+
         $absolutePath = str_starts_with($path, DIRECTORY_SEPARATOR)
             ? $path
             : base_path($path);
 
         if (! file_exists($absolutePath)) {
-            return new VulnerabilityReport(
+            return $this->attachScanState(new VulnerabilityReport(
                 vulnerabilities: [],
                 overallScore: 100,
                 summary: "File not found: {$path}",
                 ctfIdea: '',
-            );
+            ));
         }
 
         if (($refusal = $this->guardScanPath($absolutePath, $path)) !== null) {
-            return $refusal;
+            return $this->attachScanState($refusal);
+        }
+
+        if (is_dir($absolutePath)) {
+            return $this->scanCollection(
+                $this->fileCollector->collectFrom($absolutePath),
+                "No scannable files found in directory: {$path}",
+            );
         }
 
         $file = new SplFileInfo($absolutePath);
         $extracted = $this->codeExtractor->extract($file);
+        $this->filesDiscovered = 1;
 
         // Collect context for single file scan
         if ($this->contextCollector !== null && $extracted['type'] === 'controller') {
@@ -144,7 +164,11 @@ final class HackScanner implements ScannerInterface
 
         try {
             $report = $this->analyzeFiles([$extracted]);
+            $this->filesAnalyzed = 1;
         } catch (\Throwable $e) {
+            $this->chunksFailedParse++;
+            $this->recordSkippedFile($extracted['path'], ScanCoverage::REASON_AI_FAILURE);
+
             Log::warning('[HackAuditor] AI scan failed for file', [
                 'path' => $path,
                 'error' => $e->getMessage(),
@@ -162,11 +186,99 @@ final class HackScanner implements ScannerInterface
 
         $report = $this->maybeVerify($report);
 
+        return $this->attachScanState($report);
+    }
+
+    /**
+     * Chunk, analyse and merge a collection of files, tracking coverage.
+     *
+     * Shared by the full-application scan and by `--path=<directory>` so both
+     * paths get identical chunking, context collection, deterministic merging,
+     * usage accounting and coverage accounting.
+     *
+     * @param  Collection<int, SplFileInfo>  $files
+     */
+    private function scanCollection(Collection $files, string $emptyMessage): VulnerabilityReport
+    {
+        $this->filesDiscovered = $files->count();
+
+        if ($files->isEmpty()) {
+            return $this->attachScanState(new VulnerabilityReport(
+                vulnerabilities: [],
+                overallScore: 100,
+                summary: $emptyMessage,
+                ctfIdea: '',
+            ));
+        }
+
+        $chunks = $this->codeExtractor->chunk($files);
+
+        // Collect context once using all controller files from all chunks
+        $this->collectAppContext($chunks);
+
+        $report = $this->scanChunks($chunks);
+
+        $flatFiles = [];
+        foreach ($chunks as $chunk) {
+            foreach ($chunk as $file) {
+                $flatFiles[] = $file;
+            }
+        }
+
+        $report = $this->mergeAccessControlFindings($report, $flatFiles);
+
+        return $this->attachScanState($report);
+    }
+
+    /**
+     * Clear per-run coverage and skip accounting.
+     */
+    private function resetCoverage(): void
+    {
+        $this->filesSkipped = 0;
+        $this->chunksFailedParse = 0;
+        $this->filesDiscovered = 0;
+        $this->filesAnalyzed = 0;
+        $this->skippedFiles = [];
+    }
+
+    /**
+     * Attach the usage tracker and coverage record to the finished report.
+     *
+     * This is the LAST thing every public entry point does. Attaching earlier is
+     * how spend went missing: the deterministic access-control merge rebuilds the
+     * report, and a rebuilt report used to arrive with no tracker, so the whole
+     * scan recorded zero tokens and never reached the usage log.
+     */
+    private function attachScanState(VulnerabilityReport $report): VulnerabilityReport
+    {
         if ($this->usageTracker !== null) {
             $report->setUsageTracker($this->usageTracker);
         }
 
+        $report->setCoverage($this->getCoverage());
+
         return $report;
+    }
+
+    /**
+     * Record every file in a chunk as unanalysed, with the reason.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $chunk
+     */
+    private function recordSkippedChunk(array $chunk, string $reason): void
+    {
+        foreach ($chunk as $file) {
+            $this->recordSkippedFile($file['path'], $reason);
+        }
+    }
+
+    /**
+     * Record a single file as unanalysed, with the reason.
+     */
+    private function recordSkippedFile(string $path, string $reason): void
+    {
+        $this->skippedFiles[] = ['path' => $path, 'reason' => $reason];
     }
 
     /**
@@ -228,15 +340,23 @@ final class HackScanner implements ScannerInterface
      */
     public function scanCode(string $code): VulnerabilityReport
     {
+        $this->resetCoverage();
+
         $fileData = [
             'path' => 'inline-code.php',
             'content' => $code,
             'type' => 'other',
         ];
 
+        $this->filesDiscovered = 1;
+
         try {
             $report = $this->analyzeFiles([$fileData]);
+            $this->filesAnalyzed = 1;
         } catch (\Throwable $e) {
+            $this->chunksFailedParse++;
+            $this->recordSkippedFile($fileData['path'], ScanCoverage::REASON_AI_FAILURE);
+
             Log::warning('[HackAuditor] AI scan failed for inline code', [
                 'error' => $e->getMessage(),
             ]);
@@ -253,11 +373,7 @@ final class HackScanner implements ScannerInterface
 
         $report = $this->maybeVerify($report, inlineCode: $code);
 
-        if ($this->usageTracker !== null) {
-            $report->setUsageTracker($this->usageTracker);
-        }
-
-        return $report;
+        return $this->attachScanState($report);
     }
 
     /**
@@ -276,6 +392,7 @@ final class HackScanner implements ScannerInterface
 
                 if ($this->usageTracker->wouldExceedLimit($estimatedTokens)) {
                     $this->filesSkipped += count($chunk);
+                    $this->recordSkippedChunk($chunk, ScanCoverage::REASON_TOKEN_LIMIT);
 
                     continue;
                 }
@@ -283,8 +400,10 @@ final class HackScanner implements ScannerInterface
 
             try {
                 $reports[] = $this->analyzeFiles($chunk);
+                $this->filesAnalyzed += count($chunk);
             } catch (\Throwable $e) {
                 $this->chunksFailedParse++;
+                $this->recordSkippedChunk($chunk, ScanCoverage::REASON_AI_FAILURE);
 
                 Log::warning('[HackAuditor] Skipping chunk due to AI failure', [
                     'files' => array_map(fn (array $f): string => $f['path'], $chunk),
@@ -294,14 +413,8 @@ final class HackScanner implements ScannerInterface
         }
 
         $report = $this->mergeReports($reports);
-        $report = $this->maybeVerify($report);
 
-        if ($this->usageTracker !== null) {
-            $report->setUsageTracker($this->usageTracker);
-            $report->setFilesSkipped($this->filesSkipped);
-        }
-
-        return $report;
+        return $this->maybeVerify($report);
     }
 
     /**
@@ -888,7 +1001,7 @@ final class HackScanner implements ScannerInterface
 
         $newScore = min(100, $report->overallScore + $scoreImprovement);
 
-        return new VulnerabilityReport(
+        return (new VulnerabilityReport(
             vulnerabilities: $verified,
             overallScore: $newScore,
             summary: $report->summary,
@@ -898,14 +1011,23 @@ final class HackScanner implements ScannerInterface
             downgradedCount: $downgradedCount,
             verificationInputTokens: $this->usageTracker->getVerificationPromptTokens(),
             verificationOutputTokens: $this->usageTracker->getVerificationCompletionTokens(),
-        );
+        ))->inheritScanStateFrom($report);
     }
 
     /**
      * Whether this finding is eligible for exploit verification.
+     *
+     * Review items are excluded: verification exists to confirm or downgrade an
+     * ASSERTION, and a downgrade credits the score back. Paying a second AI
+     * request to "verify" a question would let review items move the score
+     * upward, which is the same defect as letting them move it downward.
      */
     private function isVerifiable(Vulnerability $vuln): bool
     {
+        if (! $vuln->isConfirmedVulnerability()) {
+            return false;
+        }
+
         return $vuln->severity === SeverityLevel::Critical
             || $vuln->severity === SeverityLevel::High;
     }
@@ -987,14 +1109,22 @@ final class HackScanner implements ScannerInterface
             static fn (Vulnerability $vulnerability): bool => ! in_array($vulnerability, $report->vulnerabilities, true),
         );
 
+        // Only ASSERTED findings move the score. A review item is a question,
+        // and a question is not evidence of exposure — letting one dock 20
+        // points would smuggle unproven findings back into the number the
+        // detectors were rewritten to keep them out of.
         $scorePenalty = 0;
         foreach ($newFindings as $vulnerability) {
+            if (! $vulnerability->isConfirmedVulnerability()) {
+                continue;
+            }
+
             $scorePenalty += $vulnerability->severity->weight();
         }
 
         $newScore = max(0, $report->overallScore - $scorePenalty);
 
-        return new VulnerabilityReport(
+        return (new VulnerabilityReport(
             vulnerabilities: $merged,
             overallScore: $newScore,
             summary: $report->summary,
@@ -1004,7 +1134,7 @@ final class HackScanner implements ScannerInterface
             downgradedCount: $report->downgradedCount,
             verificationInputTokens: $report->verificationInputTokens,
             verificationOutputTokens: $report->verificationOutputTokens,
-        );
+        ))->inheritScanStateFrom($report);
     }
 
     /**
@@ -1051,7 +1181,59 @@ final class HackScanner implements ScannerInterface
         return new AccessControlContext(
             routedMethods: $routedMethods,
             modelsWithPolicy: $this->collectModelsWithPolicy(),
+            policyAbilities: $this->collectPolicyAbilities(),
         );
+    }
+
+    /**
+     * Read app/Policies and report the abilities each Policy ACTUALLY declares.
+     *
+     * Policy files are context, not scan targets, so they are usually absent
+     * from the file list the detectors receive. Without this map a detector can
+     * only learn that "a Policy exists", which is the assumption that produced
+     * three false "authentication bypass" reports against store() actions whose
+     * policy declares no create ability at all. Parsed with the AST layer, never
+     * pattern-matched.
+     *
+     * @return array<string, array<int, string>> Short model name => ability names
+     */
+    private function collectPolicyAbilities(): array
+    {
+        $policiesPath = base_path('app/Policies');
+
+        if (! is_dir($policiesPath)) {
+            return [];
+        }
+
+        $files = glob($policiesPath.DIRECTORY_SEPARATOR.'*.php');
+
+        if ($files === false) {
+            return [];
+        }
+
+        $parser = new PhpAstParser;
+        $inspector = new PolicyInspector;
+        $abilities = [];
+
+        foreach ($files as $file) {
+            $parsed = $parser->parseFile($file);
+
+            foreach ($parsed->classes() as $class) {
+                if (! $inspector->isPolicy($class)) {
+                    continue;
+                }
+
+                $model = $inspector->modelFor($class);
+
+                if ($model === null) {
+                    continue;
+                }
+
+                $abilities[TypeNames::shortName($model)] = $inspector->abilities($class);
+            }
+        }
+
+        return $abilities;
     }
 
     /**

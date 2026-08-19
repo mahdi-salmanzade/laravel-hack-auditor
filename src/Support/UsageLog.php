@@ -35,6 +35,8 @@ final class UsageLog
             'token_limit' => $tracker->getTokenLimit() ?: null,
             'files_scanned' => $meta['files_scanned'] ?? null,
             'files_skipped' => $meta['files_skipped'] ?? 0,
+            'coverage_complete' => $meta['coverage_complete'] ?? null,
+            'aborted' => $meta['aborted'] ?? false,
             'path' => $meta['path'] ?? null,
             'score' => $meta['score'] ?? null,
             'provider' => $meta['provider'] ?? null,

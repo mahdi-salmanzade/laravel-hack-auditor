@@ -11,14 +11,34 @@ use RuntimeException;
  * Loads and represents the labeled benchmark corpus.
  *
  * The ground truth is a flat list of per-file expectations. Each expectation
- * carries the canonical vulnerability type, an approximate line, and a set of
+ * carries the canonical vulnerability type, an approximate line, a set of
  * accepted synonym types so the matcher can credit findings the AI filed under
- * an adjacent (but defensible) OWASP category.
+ * an adjacent (but defensible) OWASP category, and the ENGINE the gate holds
+ * responsible for the label.
+ *
+ * The engine tag exists so the reproducible half of the scanner can be gated on
+ * its own, with no AI provider in the loop: `hack:benchmark --deterministic`
+ * scores only the labels tagged 'deterministic'. It is a floor, not a ceiling —
+ * a deterministic detector that finds an 'ai'-tagged label is still credited in
+ * full-corpus mode.
  */
 final readonly class GroundTruth
 {
     /**
-     * @param  array<int, array{file: string, expected: array<int, array{type: string, line: int, accepted_types: array<int, string>}>}>  $samples
+     * The engine tag meaning "the reproducible, provider-independent detectors
+     * are expected to find this without any AI in the loop".
+     */
+    public const ENGINE_DETERMINISTIC = 'deterministic';
+
+    /**
+     * The engine tag for labels only the AI pass is expected to find. Also the
+     * default for an untagged label: a label is excluded from the deterministic
+     * gate unless it explicitly claims to belong there.
+     */
+    public const ENGINE_AI = 'ai';
+
+    /**
+     * @param  array<int, array{file: string, expected: array<int, array{type: string, line: int, accepted_types: array<int, string>, engine: string}>}>  $samples
      */
     public function __construct(
         public array $samples,
@@ -114,10 +134,13 @@ final readonly class GroundTruth
                     $accepted[] = $type;
                 }
 
+                $engine = strtolower(trim((string) ($entry['engine'] ?? self::ENGINE_AI)));
+
                 $expected[] = [
                     'type' => $type,
                     'line' => (int) ($entry['line'] ?? 0),
                     'accepted_types' => $accepted,
+                    'engine' => $engine === '' ? self::ENGINE_AI : $engine,
                 ];
             }
 
@@ -128,6 +151,58 @@ final readonly class GroundTruth
         }
 
         return new self($samples, $lineTolerance);
+    }
+
+    /**
+     * A copy of this ground truth keeping only the labels the given engine owns.
+     *
+     * EVERY sample file is retained, including ones whose labels were all
+     * filtered out. Dropping those files would drop them from the corpus, and a
+     * finding reported on a file outside the corpus is ignored rather than
+     * counted — so filtering by file would quietly stop penalising false
+     * positives on exactly the samples the engine is not supposed to flag.
+     */
+    public function onlyEngine(string $engine): self
+    {
+        $engine = strtolower(trim($engine));
+
+        $samples = array_map(
+            static fn (array $sample): array => [
+                'file' => $sample['file'],
+                'expected' => array_values(array_filter(
+                    $sample['expected'],
+                    static fn (array $entry): bool => $entry['engine'] === $engine,
+                )),
+            ],
+            $this->samples,
+        );
+
+        return new self($samples, $this->lineTolerance);
+    }
+
+    /**
+     * The labels this ground truth excludes for a given engine, as
+     * "file:line [type]" strings. Rendered by the deterministic gate so the
+     * scope of the measurement is stated rather than assumed.
+     *
+     * @return array<int, string>
+     */
+    public function labelsExcludedFrom(string $engine): array
+    {
+        $engine = strtolower(trim($engine));
+        $excluded = [];
+
+        foreach ($this->samples as $sample) {
+            foreach ($sample['expected'] as $entry) {
+                if ($entry['engine'] === $engine) {
+                    continue;
+                }
+
+                $excluded[] = sprintf('%s:%d [%s]', $sample['file'], $entry['line'], $entry['type']);
+            }
+        }
+
+        return $excluded;
     }
 
     /**

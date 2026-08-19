@@ -5,6 +5,62 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-08-19
+
+The deterministic detection engine was rebuilt on a real AST after a run on a production 73-controller Laravel app returned **0 true positives and 5 false positives**, every one with a wrong line number, and one suggested fix that would have broken room creation. This release is the response to that report.
+
+### Measured Impact
+
+- **Real-world precision: 297 false positives → 0.** The engine was measured over **4,479 files** from six large open-source Laravel applications (Monica, Akaunting, Pixelfed, BookStack, Snipe-IT, Koel), none consulted while writing the detectors. Before: 298 findings, 297 false (**99.7% FP rate**). Now: **0 asserted vulnerabilities**, 28 review items — 3 once a route map is supplied, which is what a real scan has. `UnauthorizedModelFetchDetector` went 191 → 0, `SensitiveFillableDetector` 87 → 3 review, `SsrfDetector` 0 throughout.
+- **Recall held.** `laravel-vuln-lab` still yields all 7 planted findings with identical composition, all `class: vulnerability, confidence: proven`. One line was corrected in the process: the IDOR was previously reported on line 99, a *comment line*, and is now on 100.
+- **Four distinct species of app-breaking advice eliminated**, each found by an adversary after the previous one was fixed: (1) an ability the policy never declared; (2) a variable bound only inside a closure; (3) a variable bound only in a `try`/`match`/`foreach` — flow-control does not create scope in PHP, so scope-awareness alone was not enough; (4) **`$this->authorize()` itself being undefined** — since Laravel 11 the generated base controller carries no `AuthorizesRequests` trait, so the advice was a **500 on every request**, worse than the original incident. Runtime-proven on a booted app: the old advice threw `Call to undefined method`; the new `Gate::authorize()` reaches the policy and denies correctly.
+- **`hack:scan` crashed on any application over ~600 PHP files.** The AST cache was unbounded, so a 750-file app exhausted PHP's default 128M `memory_limit` mid-scan — a FATAL that no `try`/`catch` can intercept, so the parser's graceful-degradation path never ran and the scan produced nothing. All six corpus apps died. Memory is now bounded by a measured byte budget and every app completes at the default limit.
+- **Test suite: 663 → 1039 tests** (2,743 assertions), PHPStan level 8 clean.
+
+### Added
+
+- **`src/Scanner/Php/` — a real semantic layer** built on `nikic/php-parser` (now a direct dependency). Resolves receiver types, Laravel input trust, policy abilities, class ancestry and definite assignment. Every previous false positive in this package came from pattern-matching raw PHP source; no regex in the detection path survives.
+- **Two finding classes.** `vulnerability` requires a complete evidence chain — source, sink, and the absence of a guard, all resolved from your code. Everything else is `review`: a question, excluded from the count, the score and the exit code. Confidence (`proven`/`probable`/`possible`) is tracked separately from severity, because *"how bad if real"* and *"how sure am I"* are different questions and collapsing them is what produced five confident HIGHs about correct code. Modelled on SonarQube's Vulnerability/Security Hotspot split.
+- **A precision corpus** (`tests/Fixtures/precision/`) encoding the five real-world failures as permanent regression tests, plus a location invariant asserting every reported line really contains the construct described.
+
+### Changed
+
+- **A review finding can never carry a suggested fix** — the string is dropped in `Vulnerability`'s constructor, so a detector cannot reintroduce one by forgetting. A fix may only name identifiers proven to exist and be in scope: policy classes are quoted from the class actually resolved (never synthesised as `{Model}Policy`), variables must be **definitely assigned** on all paths, and the method being advised must be callable on that class.
+- **Mass-assignment findings require a proven sink.** A privilege field in `$fillable` is not exploitable unless request data can reach it. Ownership keys (`user_id`, `company_id`, `tenant_id`) with no sink now emit nothing — the previous behaviour told Akaunting to remove `company_id` from 25 models, which would have disabled its global tenant scope and caused cross-tenant data exposure.
+- **`hack:benchmark` refuses to print a score for samples it could not analyse**, and exits non-zero instead. The gate had silently stopped exercising the access-control detectors.
+- **The `F1 ≈ 0.94` claim is retracted.** It was measured on a 10-sample corpus authored alongside the detectors — recall on friendly data, not precision. For scale, Checkmarx measures its own SAST at F1 0.64 on production code. Precision and recall are now published separately, with the corpus named.
+
+### Fixed — scan accounting and honesty
+
+- **A full scan recorded zero tokens and zero cost.** `HackScanner::scan()` attached the `UsageTracker` to the report inside `scanChunks()`, then handed that report to the deterministic access-control merge, which constructs a **new** `VulnerabilityReport` — dropping the tracker. Any scan where the deterministic layer produced or collapsed a finding therefore lost its entire spend record: `hack:usage` never saw it, the saved JSON had no `usage` field, and `--limit` could not budget against it. A real 73-file, 213-second run cost roughly $3–5 and was logged as nothing. Usage and coverage are now attached as the last step of every entry point, `inheritScanStateFrom()` carries them across every report rebuild (merge and verification), and the command logs from the tracker it owns rather than from the report, so a run that dies after paying still records what it spent.
+- **Partial coverage was reported as a bare count.** A run printed "1 chunk(s) returned unparseable AI responses and were skipped" followed by a definitive score, with no way to learn which files went unexamined. Every skipped file is now named with its reason (`token_limit`, `ai_failure`) in the console, the JSON report, the HTML report and the MCP `scan_path` response.
+- **`overall_score` rewarded scanning nothing.** The score is penalty-only — it starts at 100 and drops per finding — so an empty directory scored a flawless 100/100 while a real codebase scored 0/100. The score is now coverage-gated: it is withheld (console shows "not available", JSON/MCP emit `null` with `score_suppressed` and `score_suppression_reason`) whenever zero files were analysed or any discovered file went unscanned.
+- **`--path=<directory>` silently scanned nothing.** The flag has always advertised "a specific file or directory", but a directory satisfied `file_exists()`, extracted to empty content, and produced a full-price AI request over an empty file plus a confident, evidence-free report. Directories now walk their contents through `FileCollector::collectFrom()` — same extension, size, exclusion, sensitive-file and binary filters as a full scan — and get the same chunking and coverage accounting. The same fix applies to the MCP `scan_path` tool, which advertises the same capability.
+
+### Fixed — the accuracy gate measured less than it reported
+
+- **`hack:benchmark` had stopped crediting the access-control corpus entirely, and said nothing.** The access-control engine now refuses to report a record exposure it cannot attribute to a routed entry point — the rule that took 191 false IDOR reports on 6,221 real files down to zero. The benchmark corpus, however, is a directory of standalone fixture files with no application around them: no route table, so every controller sample resolved to `unreachable` and was dropped *before analysis*. The planted IDOR at `tests/Fixtures/benchmark/samples/IdorController.php:14` — `Invoice::findOrFail($id)` returned straight to the caller, textbook ground truth — stopped being credited, and the gate went on printing a score for detectors it had stopped exercising. Not one test went red.
+- The fix is not a relaxed detector. The corpus now **describes its own application**: `tests/Fixtures/benchmark/routes.php` names the controller action behind every sample, and the command builds a `Router` from that manifest and hands the scanner a `RuntimeIntrospector` backed by it. The host route table is never mutated or read. Reachability suppression is untouched — with the manifest removed, the corpus scores zero again, which `tests/Feature/BenchmarkCorpusTest.php` asserts explicitly so the credit can never be mistaken for a loosened rule.
+- **An unmeasured sample can no longer pass for a clean one.** `hack:benchmark` now refuses to report a score at all — exit 1, offending actions named — when a corpus sample fails to parse or has no route entry. That silence was the whole defect; it is now the loudest failure the command has.
+- **The output states its own scope.** Every result carries the caveat that these numbers come from a *synthetic* corpus authored alongside the detectors, making them a **recall check and regression gate, not a precision claim about real code**. Real-code precision is measured separately, on unmodified third-party applications. The README claim was updated to match.
+
+### Added
+
+- **`hack:benchmark --deterministic`** — scores only the reproducible, provider-independent engine, with **no AI key and no network**, so the deterministic half of the scanner is gateable on every commit. Ground-truth labels now carry an `engine` tag (`deterministic` / `ai`) naming which engine the gate holds responsible; the tag is a floor, not a ceiling. Measured: precision 1.00, recall 1.00, F1 1.00 over the 3 deterministic-owned labels (idor, ssrf, sensitive_data_exposure) — including `IdorController.php:14`, at the correct line.
+- **`hack:benchmark --routes=`** — point the run at a custom corpus route manifest.
+- **`src/Benchmark/CorpusRoutes.php`** and **`src/Benchmark/CorpusSamples.php`** — the corpus's route manifest and its analysability audit (unparsable files, unrouted controller actions). **`GroundTruth::onlyEngine()`** / **`labelsExcludedFrom()`** scope a run to one engine while keeping every sample file in the corpus, so false positives on out-of-scope samples are still penalised.
+- **`testbench.yaml`** — lets `vendor/bin/testbench hack:benchmark --deterministic` run the gate straight from the package root.
+- 13 regression tests in `tests/Feature/BenchmarkCorpusTest.php` that fail the moment a benchmark sample becomes unanalysable again.
+- **`ScanCoverage`** (`src/Scanner/ScanCoverage.php`) — an immutable record of files discovered, files analysed, and every skipped file with its reason. Exposed on `VulnerabilityReport` via `setCoverage()` / `getCoverage()`, and alongside it `scoreIsMeaningful()` and `scoreSuppressionReason()`.
+- **`FileCollector::collectFrom(string $directory)`** — filtered collection from one directory, backing `--path=<directory>`.
+- `coverage`, `score_suppressed` and `score_suppression_reason` in `hack:scan --json`, `VulnerabilityReport::toArray()` and the MCP structured response; `files_scanned`, `coverage_complete` and `aborted` in the usage log.
+- 20 regression tests in `tests/Feature/ScanAccountingTest.php`.
+
+### Changed (breaking for JSON/API consumers)
+
+- `overall_score` is now `null` — not `0`, not `100` — in `--json`, saved scans and MCP output whenever coverage is incomplete or empty. CI gates reading `jq .overall_score` must handle `null`.
+- `HackAuditorManager::score()` returns `?int`; it is `null` when no scan is saved or the saved scan withheld its score. It previously returned `0`, which is indistinguishable from a catastrophic result.
+
 ## [2.0.1] - 2026-08-19
 
 ### Fixed

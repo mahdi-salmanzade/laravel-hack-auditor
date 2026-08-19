@@ -1,0 +1,9 @@
+# Lets `vendor/bin/testbench <command>` boot a throwaway Laravel app with this
+# package registered, so the accuracy gate can be run straight from the package
+# root without an application around it:
+#
+#   vendor/bin/testbench hack:benchmark --deterministic
+#
+# The deterministic scope needs no AI provider and no network.
+providers:
+  - Mahdi\HackAuditor\HackAuditorServiceProvider

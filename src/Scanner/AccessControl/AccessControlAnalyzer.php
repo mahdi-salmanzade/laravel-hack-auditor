@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\Scanner\AccessControl;
 
+use Mahdi\HackAuditor\Scanner\Php\SemanticWorkspace;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
 
@@ -52,12 +53,26 @@ final class AccessControlAnalyzer
      */
     public function __construct(?array $detectors = null)
     {
+        // ONE semantic layer for the whole run. Each detector used to build its
+        // own — parsing the entire file set, then indexing it, five times over —
+        // and each of those layers retained every ParsedFile it had produced.
+        // That exhausted PHP's default 128M memory_limit part-way through a
+        // 750-file application and killed the process outright: a fatal, not a
+        // catchable Throwable, so the parser's own graceful-degradation path
+        // never ran and the scan produced nothing at all.
+        //
+        // The shared workspace indexes the file set once and hands the same
+        // context to every detector. Combined with the streaming SemanticContext
+        // and the bounded parser cache, peak memory is now set by how many files
+        // are open at once, not by how large the application is.
+        $workspace = new SemanticWorkspace;
+
         $this->detectors = $detectors ?? [
-            new SensitiveFillableDetector,
-            new UnauthorizedModelFetchDetector,
-            new PolicyRouteMismatchDetector,
-            new SsrfDetector,
-            new SensitiveDataExposureDetector,
+            new SensitiveFillableDetector($workspace),
+            new UnauthorizedModelFetchDetector($workspace),
+            new PolicyRouteMismatchDetector($workspace),
+            new SsrfDetector($workspace),
+            new SensitiveDataExposureDetector($workspace),
         ];
     }
 

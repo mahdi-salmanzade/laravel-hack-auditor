@@ -6,8 +6,11 @@ namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
+use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
+use Mahdi\HackAuditor\Support\Confidence;
+use Mahdi\HackAuditor\Support\FindingClass;
 use Mahdi\HackAuditor\Support\ScanHistory;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
@@ -116,23 +119,96 @@ final class HackReportCommand extends Command
         /** @var array<int, array<string, mixed>> $vulnData */
         $vulnData = is_array($scanData['vulnerabilities'] ?? null) ? $scanData['vulnerabilities'] : [];
 
-        $vulnerabilities = array_map(function (array $data): Vulnerability {
-            return new Vulnerability(
-                type: VulnerabilityType::fromString((string) ($data['type'] ?? 'missing_validation')),
-                location: (string) ($data['location'] ?? 'unknown'),
-                line: (int) ($data['line'] ?? 0),
-                severity: SeverityLevel::fromString((string) ($data['severity'] ?? 'low')),
-                description: (string) ($data['description'] ?? ''),
-                proof: (string) ($data['proof'] ?? ''),
-                fix: (string) ($data['fix'] ?? ''),
-            );
-        }, $vulnData);
+        /** @var array<int, array<string, mixed>> $reviewData */
+        $reviewData = is_array($scanData['review_items'] ?? null) ? $scanData['review_items'] : [];
 
-        return new VulnerabilityReport(
+        $vulnerabilities = array_map(
+            $this->rehydrateFinding(...),
+            array_merge($vulnData, $reviewData),
+        );
+
+        $report = new VulnerabilityReport(
             vulnerabilities: $vulnerabilities,
             overallScore: (int) ($scanData['overall_score'] ?? 0),
             summary: (string) ($scanData['summary'] ?? ''),
             ctfIdea: '',
+        );
+
+        $coverage = $this->restoreCoverage($scanData);
+
+        if ($coverage !== null) {
+            $report->setCoverage($coverage);
+        }
+
+        return $report;
+    }
+
+    /**
+     * Rebuild a single finding from saved scan data.
+     *
+     * A saved file written before finding classes existed has no 'class' key.
+     * Those entries were all assertions, so they rehydrate as assertions —
+     * FindingClass::fromString() would otherwise fail them safe into Review and
+     * silently empty out an old report's vulnerability list.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function rehydrateFinding(array $data): Vulnerability
+    {
+        return new Vulnerability(
+            type: VulnerabilityType::fromString((string) ($data['type'] ?? 'missing_validation')),
+            location: (string) ($data['location'] ?? 'unknown'),
+            line: (int) ($data['line'] ?? 0),
+            severity: SeverityLevel::fromString((string) ($data['severity'] ?? 'low')),
+            description: (string) ($data['description'] ?? ''),
+            proof: (string) ($data['proof'] ?? ''),
+            fix: (string) ($data['fix'] ?? ''),
+            findingClass: isset($data['class'])
+                ? FindingClass::fromString((string) $data['class'])
+                : FindingClass::Vulnerability,
+            confidence: isset($data['confidence'])
+                ? Confidence::fromString((string) $data['confidence'])
+                : Confidence::Probable,
+        );
+    }
+
+    /**
+     * Rebuild the coverage record from a saved scan.
+     *
+     * Without this a regenerated report would silently reacquire an
+     * authoritative-looking score that the original scan had deliberately
+     * withheld.
+     *
+     * @param  array<string, mixed>  $scanData
+     */
+    private function restoreCoverage(array $scanData): ?ScanCoverage
+    {
+        $coverage = $scanData['coverage'] ?? null;
+
+        if (! is_array($coverage)) {
+            return null;
+        }
+
+        /** @var array<int, array{path: string, reason: string}> $skipped */
+        $skipped = [];
+
+        if (is_array($coverage['skipped_files'] ?? null)) {
+            foreach ($coverage['skipped_files'] as $entry) {
+                if (! is_array($entry)) {
+                    continue;
+                }
+
+                $skipped[] = [
+                    'path' => (string) ($entry['path'] ?? 'unknown'),
+                    'reason' => (string) ($entry['reason'] ?? ScanCoverage::REASON_AI_FAILURE),
+                ];
+            }
+        }
+
+        return new ScanCoverage(
+            filesDiscovered: (int) ($coverage['files_discovered'] ?? 0),
+            filesAnalyzed: (int) ($coverage['files_analyzed'] ?? 0),
+            skipped: $skipped,
         );
     }
 

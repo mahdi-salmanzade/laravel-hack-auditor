@@ -79,14 +79,22 @@ final class HackAuditorManager
     }
 
     /**
-     * Return the security score from the latest saved scan, or 0 if none exist.
+     * Return the security score from the latest saved scan.
+     *
+     * Returns null when no scan has been saved, or when the saved scan withheld
+     * its score because coverage was incomplete. Returning 0 in those cases
+     * would be indistinguishable from a genuinely catastrophic result.
      */
-    public function score(): int
+    public function score(): ?int
     {
         $history = new ScanHistory;
         $latest = $history->latest();
 
-        return (int) ($latest['overall_score'] ?? 0);
+        if ($latest === null || ! isset($latest['overall_score'])) {
+            return null;
+        }
+
+        return (int) $latest['overall_score'];
     }
 
     /**
