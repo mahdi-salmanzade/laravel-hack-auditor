@@ -5,11 +5,13 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.1] - 2026-08-19
 
-### Changed
+### Fixed
 
+- **`SensitiveFillableDetector` silently detected nothing when a comment inside `$fillable` contained an apostrophe.** The field list was extracted with `preg_match_all("/['\"]([^'\"]+)['\"]/")` over the raw array body, so quotes were paired *across* comments: one apostrophe — `// lets a request reassign someone else's post` — desynchronised every quote after it and swallowed the remaining fields. `['user_id', 'is_admin']` parsed as `["s post", ", // privilege flag"]`, and the detector returned no findings at all. No error, no warning; one of the five deterministic detectors just stopped working. Apostrophes in comments (`don't`, `it's`, `user's`) are common enough that real models were affected, and escaped quotes inside a value had the same effect. Parsing is now tokenised via `token_get_all()`, which sees comments and escape sequences the way PHP does. Present since the detector shipped in 1.7.0. Found while building fixtures for it in `laravel-vuln-lab`, which is exactly the coverage gap the lab exists to close. Three regression tests added (663 tests total).
 - `detectPricing()`'s last-resort fallback now names `claude-sonnet-5` instead of `claude-sonnet-4-6`, matching what `defaultModel('anthropic')` returns. Same rate either way ($3/$15), so no estimate changes — this only removes a disagreement between the two code paths.
+- **CI**: added the `phpunit.xml` the package never had. Pest fell back to implicit config discovery, which works on macOS but on Linux resolved an empty `--configuration` path, so PHPUnit read the next CLI token as the config file (`Could not read XML from file "--cache-directory"`). The suite passed locally and failed on every CI leg.
 
 ## [2.0.0] - 2026-08-19
 

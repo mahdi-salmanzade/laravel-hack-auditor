@@ -202,3 +202,40 @@ it('does NOT flag a model without a fillable array', function (): void {
 
     expect($findings)->toBeEmpty();
 });
+
+it('still detects privilege fields when a comment inside $fillable contains an apostrophe', function (): void {
+    // A regex over the raw array body pairs quotes across comments, so one
+    // apostrophe here used to swallow every field after it and silently
+    // disable the detector. Parsing is tokenised now.
+    $findings = runFillableDetector(fillableModel(<<<'BODY'
+    protected $fillable = [
+        // lets a request reassign someone else's account
+        'user_id',
+        // privilege flag
+        'is_admin',
+    ];
+BODY));
+
+    expect($findings)->not->toBeEmpty()
+        ->and($findings[0]->type)->toBe(VulnerabilityType::MassAssignment);
+});
+
+it('ignores fields that only appear inside comments', function (): void {
+    $findings = runFillableDetector(fillableModel(<<<'BODY'
+    protected $fillable = [
+        // 'is_admin' is deliberately NOT mass assignable
+        'name',
+    ];
+BODY));
+
+    expect($findings)->toBeEmpty();
+});
+
+it('reads $fillable written with hash and block comments', function (): void {
+    foreach ([
+        "    protected \$fillable = [\n        # don't do this\n        'is_admin',\n    ];",
+        "    protected \$fillable = [\n        /* it's risky */\n        'is_admin',\n    ];",
+    ] as $body) {
+        expect(runFillableDetector(fillableModel($body)))->not->toBeEmpty();
+    }
+});

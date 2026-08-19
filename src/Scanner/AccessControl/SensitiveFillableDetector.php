@@ -338,12 +338,40 @@ final class SensitiveFillableDetector implements AccessControlDetector
         }
 
         $inner = substr($content, $start, $pos - $start - 1);
+
+        return self::extractStringLiterals($inner);
+    }
+
+    /**
+     * Extract the string literals from an array body.
+     *
+     * Tokenised rather than pattern-matched. A regex over the raw text pairs
+     * quotes across comments, so a single apostrophe in a comment inside the
+     * array — "someone else's post" — desynchronises every quote after it and
+     * silently drops the remaining fields, disabling the detector with no
+     * error. Escaped quotes inside a literal have the same effect. The
+     * tokeniser sees comments and escapes as PHP does.
+     *
+     * @return array<int, string>
+     */
+    private static function extractStringLiterals(string $inner): array
+    {
+        $tokens = @token_get_all('<?php ['.$inner.'];');
+
         $values = [];
 
-        if (preg_match_all("/['\"]([^'\"]+)['\"]/", $inner, $valueMatches)) {
-            foreach ($valueMatches[1] as $value) {
-                $values[] = strtolower(trim($value));
+        foreach ($tokens as $token) {
+            if (! is_array($token) || $token[0] !== T_CONSTANT_ENCAPSED_STRING) {
+                continue;
             }
+
+            // Strip the surrounding quotes, then resolve backslash escapes.
+            $literal = $token[1];
+            $quote = $literal[0];
+            $value = substr($literal, 1, -1);
+            $value = str_replace(['\\'.$quote, '\\\\'], [$quote, '\\'], $value);
+
+            $values[] = strtolower(trim($value));
         }
 
         return $values;
