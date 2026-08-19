@@ -5,6 +5,34 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-08-19
+
+Completes the memory work v2.1.0 started. v2.1.0 stopped the scanner crashing; this makes it cheap, and closes a latent correctness bug that eviction had made reachable.
+
+### Measured Impact
+
+- **Peak memory cut 3–6×, and the scan got faster rather than slower.** Measured with `memory_get_peak_usage(true)` at PHP's default limit: Monica 256 MB → **54 MB** (3.1s → 1.7s), Akaunting 362 → **62 MB**, Pixelfed 508 → **90 MB** (6.5s → 4.8s), BookStack 226 → **54 MB**, Snipe-IT 562 → **74 MB**, Koel 180 → **50 MB**. All six corpora concatenated — 4,479 files — now complete in one pass at 108 MB. The "before" figures required `-d memory_limit=2G` to measure at all.
+- **Output is byte-identical.** Every description, proof and line across all six applications matches the v2.1.0 baseline exactly: 0 asserted vulnerabilities, 28 review items. `laravel-vuln-lab` still yields the same 7 findings. This was a pure retention change, and it is asserted as one.
+
+### Fixed
+
+- **Two unbounded caches keyed on `spl_object_id()`.** `TaintTracker` and `ReceiverResolver` cached per-method analysis under an object id, which pinned every analysed method's whole file for the run. Worse, PHP **recycles object ids** the moment an object is freed — so once the parser actually began evicting syntax trees, those caches could have answered with a *different* method's analysis. Bounded LRUs now, keyed on `MethodShape::identity()` (path::class::method@line) with an identity check on the cached shape, so a re-parsed tree can never be served stale results. The eviction introduced in v2.1.0 is what made this reachable.
+- **Retention lived in three places, not one.** `SemanticContext` held every `ParsedFile`; the indexes held `ClassShape`/`MethodShape` objects, each of which pins its whole file through parent links; and the two caches above. All three had to go, so `ClassIndex` and `PolicyIndex` now store node-free summaries with line numbers captured while the AST is alive, and `SemanticContext` holds source strings plus a bounded parser, materialising one tree at a time.
+- **The parser budget is measured in bytes, not files.** A file-count cap is meaningless when annotated ASTs run 50–130× their source: Pixelfed's 170 KB `ApiV1Controller` alone parses to **22 MB**, so a 300-file cap held anywhere between 15 MB and 300 MB depending on which files happened to be resident. The budget is now `min(24 MB, memory_limit / 5)`, so a 64 M host self-tightens rather than dying.
+
+### Added
+
+- **`SemanticWorkspace`** — one parse-and-index pass shared by all five detectors instead of five. Combined with summary-driven pre-filters (a detector skips files declaring no controller, using a filter written next to its own `isController` test), this is what keeps a streaming design *faster* than the retaining one.
+- **`tests/Unit/PhpMemoryBoundTest.php`** — asserts the shape of the curve: peak at 1,200 files must not exceed peak at 200 files plus fixed slack. Verified to catch the original bug — reintroducing retention makes it fail with the exact "Allowed memory size exhausted" fatal.
+
+### Changed (internal API)
+
+- `SemanticContext::files()` / `analysable()` return Generators rather than arrays; `controllers()` and `ClassIndex::all()` return `ClassSummary[]`; `PolicyIndex::policies()` is replaced by `policyNames()`; detector constructors take `?SemanticWorkspace` rather than `?PhpAstParser`. These classes are undocumented internals introduced in v2.1.0 earlier the same day and are not part of the supported surface, but the change is recorded here rather than made silently.
+
+### Known limits
+
+`SensitiveDataExposureDetector` and the mass-assignment sink sweep must still open every file — it can fire on any class, so no class-level pre-filter is sound. Two full passes remain by necessity.
+
 ## [2.1.0] - 2026-08-19
 
 The deterministic detection engine was rebuilt on a real AST after a run on a production 73-controller Laravel app returned **0 true positives and 5 false positives**, every one with a wrong line number, and one suggested fix that would have broken room creation. This release is the response to that report.

@@ -278,7 +278,20 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
         $semantic = $this->workspace->contextFor($sources);
         $findings = [];
 
-        foreach ($semantic->analysable() as $parsed) {
+        // Decide from the class INDEX whether a file can hold a routable
+        // controller, and only then open it. Most of an application declares
+        // none, and parsing those to find that out is pure cost.
+        foreach ($semantic->paths() as $path) {
+            if (! $this->declaresRoutableController($path, $semantic)) {
+                continue;
+            }
+
+            $parsed = $semantic->parsed($path);
+
+            if ($parsed === null || ! $parsed->isAnalysable()) {
+                continue;
+            }
+
             foreach ($parsed->classes() as $class) {
                 if (! $this->isRoutableController($class, $semantic)) {
                     continue;
@@ -303,9 +316,27 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
      */
     private function isRoutableController(ClassShape $class, SemanticContext $semantic): bool
     {
-        return $class->node() instanceof Node\Stmt\Class_
+        return $class->isClass()
             && ! $class->isAbstract()
             && $semantic->semantics()->isController($class);
+    }
+
+    /**
+     * The same test as isRoutableController(), asked of the node-free summaries
+     * the index holds. It must stay an exact mirror: a file this rejects is
+     * never opened, so any divergence is a silently missed finding.
+     */
+    private function declaresRoutableController(string $path, SemanticContext $semantic): bool
+    {
+        foreach ($semantic->summariesIn($path) as $summary) {
+            if ($summary->isClass()
+                && ! $summary->isAbstract()
+                && $semantic->semantics()->isController($summary)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

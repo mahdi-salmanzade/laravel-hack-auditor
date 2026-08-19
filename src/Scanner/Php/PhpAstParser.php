@@ -61,6 +61,19 @@ final class PhpAstParser
     private const MAX_CACHED_AST_BYTES = 24 * 1024 * 1024;
 
     /**
+     * Share of PHP's memory_limit the cache may occupy when that limit is
+     * tighter than the ceiling above.
+     *
+     * The rest of the budget belongs to everyone else: the source strings the
+     * caller is holding, the findings being built, and the transient cost of
+     * parsing the next file, which for a large controller briefly exceeds the
+     * tree it produces. A fifth leaves room for all of it, so a host configured
+     * with 64M degrades to a smaller working set and more re-parsing instead of
+     * dying the way an absolute budget would.
+     */
+    private const LIMIT_SHARE_DIVISOR = 5;
+
+    /**
      * Secondary cap for pathologically small files, so a scan of ten thousand
      * one-line stubs cannot accumulate unbounded per-object overhead that the
      * byte budget alone would not notice.
@@ -93,6 +106,8 @@ final class PhpAstParser
     private int $cachedBytes = 0;
 
     private int $parseCount = 0;
+
+    private ?int $budget = null;
 
     /**
      * Paths that failed to parse, mapped to the reason.
@@ -169,8 +184,10 @@ final class PhpAstParser
      */
     private function evict(): void
     {
+        $budget = $this->budget();
+
         while (count($this->cache) > 1
-            && ($this->cachedBytes > self::MAX_CACHED_AST_BYTES || count($this->cache) > self::MAX_CACHED_FILES)) {
+            && ($this->cachedBytes > $budget || count($this->cache) > self::MAX_CACHED_FILES)) {
             // The loop condition guarantees at least two entries, so this key
             // is always a string — no null branch to guard.
             $oldest = (string) array_key_first($this->cache);
@@ -178,6 +195,54 @@ final class PhpAstParser
             $this->cachedBytes -= $this->costs[$oldest];
             unset($this->cache[$oldest], $this->costs[$oldest]);
         }
+    }
+
+    /**
+     * Bytes of syntax tree this process is willing to hold: the ceiling, or a
+     * share of a tighter memory_limit, whichever is smaller.
+     */
+    public function budget(): int
+    {
+        if ($this->budget !== null) {
+            return $this->budget;
+        }
+
+        $limit = $this->memoryLimitBytes();
+
+        if ($limit === null) {
+            return $this->budget = self::MAX_CACHED_AST_BYTES;
+        }
+
+        return $this->budget = max(
+            self::MIN_ENTRY_COST,
+            min(self::MAX_CACHED_AST_BYTES, intdiv($limit, self::LIMIT_SHARE_DIVISOR)),
+        );
+    }
+
+    /**
+     * PHP's configured memory_limit in bytes, or null when it is unlimited or
+     * unreadable.
+     */
+    private function memoryLimitBytes(): ?int
+    {
+        $limit = (string) ini_get('memory_limit');
+
+        if ($limit === '' || $limit === '-1') {
+            return null;
+        }
+
+        $value = (int) $limit;
+
+        $multiplier = match (strtolower(substr($limit, -1))) {
+            'g' => 1024 * 1024 * 1024,
+            'm' => 1024 * 1024,
+            'k' => 1024,
+            default => 1,
+        };
+
+        $bytes = $value * $multiplier;
+
+        return $bytes > 0 ? $bytes : null;
     }
 
     /**

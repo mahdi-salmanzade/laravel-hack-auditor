@@ -135,6 +135,17 @@ final class SemanticContext
     }
 
     /**
+     * What a file declares, without opening it — the cheap pre-filter a
+     * detector uses to skip files that cannot possibly interest it.
+     *
+     * @return array<int, ClassSummary>
+     */
+    public function summariesIn(string $path): array
+    {
+        return $this->classes->summariesIn($path);
+    }
+
+    /**
      * Every file handed in, analysable or not, one AST alive at a time.
      *
      * @return Generator<int, ParsedFile>

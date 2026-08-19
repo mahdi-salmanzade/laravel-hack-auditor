@@ -245,10 +245,19 @@ final class SensitiveFillableDetector implements AccessControlDetector
             ),
         );
 
-        $sinks = $this->collectSinks($semantics);
+        // The sink sweep has to open every file — a mass-assignment call can be
+        // anywhere. It notes, while each file is already open, which ones declare
+        // a `$fillable` array at all; nothing else can produce a finding, so the
+        // second pass re-opens roughly 5% of an application instead of all of it.
+        $fillableDeclarers = [];
+        $sinks = $this->collectSinks($semantics, $fillableDeclarers);
         $findings = [];
 
         foreach ($files as $file) {
+            if (! isset($fillableDeclarers[$file->path])) {
+                continue;
+            }
+
             $parsed = $semantics->parsed($file->path);
 
             if ($parsed === null || ! $parsed->isAnalysable()) {
@@ -685,14 +694,19 @@ final class SensitiveFillableDetector implements AccessControlDetector
     /**
      * Every mass-assignment sink in the scan, keyed by lowercased model FQCN.
      *
+     * @param  array<string, true>  $fillableDeclarers  Out-parameter: paths declaring a `$fillable` array
      * @return array<string, array<int, array{model: string, path: string, line: int, call: string, source: string, reach: array{kind: string, fields: array<int, string>}}>>
      */
-    private function collectSinks(SemanticContext $semantics): array
+    private function collectSinks(SemanticContext $semantics, array &$fillableDeclarers): array
     {
         $sinks = [];
 
         foreach ($semantics->analysable() as $parsed) {
             foreach ($parsed->classes() as $class) {
+                if ($this->declaredStringArray($class, 'fillable') !== []) {
+                    $fillableDeclarers[$parsed->path] = true;
+                }
+
                 foreach ($class->methods() as $method) {
                     foreach ($this->sinksIn($parsed->path, $method, $semantics) as $sink) {
                         $sinks[strtolower($sink['model'])][] = $sink;

@@ -184,8 +184,22 @@ final class SsrfDetector implements AccessControlDetector
         $semantics = $this->workspace->contextFor($payload);
         $findings = [];
 
-        foreach ($semantics->analysable() as $parsed) {
-            $source = $sources[$parsed->path] ?? null;
+        // Decide from the class INDEX whether a file can hold a controller, and
+        // only then open it. Four fifths of a real application declares none, and
+        // parsing those to discover it is the difference between a
+        // bounded-memory pass and a slow one.
+        foreach ($semantics->paths() as $path) {
+            $source = $sources[$path] ?? null;
+
+            if (! $this->declaresControllerClass($path, $source, $semantics)) {
+                continue;
+            }
+
+            $parsed = $semantics->parsed($path);
+
+            if ($parsed === null || ! $parsed->isAnalysable()) {
+                continue;
+            }
 
             foreach ($parsed->classes() as $class) {
                 if (! $this->isControllerClass($class, $source, $semantics)) {
@@ -219,6 +233,26 @@ final class SsrfDetector implements AccessControlDetector
         }
 
         return $source?->type === 'controller' || $semantics->semantics()->isController($class);
+    }
+
+    /**
+     * The same test as isControllerClass(), asked of the node-free summaries the
+     * index holds. It must stay an exact mirror: a file this rejects is never
+     * opened, so any divergence is a silently missed finding.
+     */
+    private function declaresControllerClass(string $path, ?SourceFile $source, SemanticContext $semantics): bool
+    {
+        foreach ($semantics->summariesIn($path) as $summary) {
+            if ($summary->isInterface()) {
+                continue;
+            }
+
+            if ($source?->type === 'controller' || $semantics->semantics()->isController($summary)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

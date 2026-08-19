@@ -234,6 +234,10 @@ final class PolicyRouteMismatchDetector implements AccessControlDetector
         // this used to — pinned every syntax tree in the scan at once, which is
         // what put a large application over PHP's default memory_limit.
         foreach ($sources as $file) {
+            if (! $this->declaresController($file, $semantic)) {
+                continue;
+            }
+
             $parsedFile = $semantic->parsed($file->path);
 
             if ($parsedFile === null || ! $parsedFile->isAnalysable()) {
@@ -1323,5 +1327,25 @@ final class PolicyRouteMismatchDetector implements AccessControlDetector
         }
 
         return str_ends_with($class->shortName(), 'Controller') || $file->type === 'controller';
+    }
+
+    /**
+     * The same test as isController(), asked of the node-free summaries the
+     * index holds, so a file that cannot hold a controller is never opened. It
+     * must stay an exact mirror: any divergence is a silently missed finding.
+     */
+    private function declaresController(SourceFile $file, SemanticContext $semantic): bool
+    {
+        foreach ($semantic->summariesIn($file->path) as $summary) {
+            if ($summary->isInterface() || $summary->isAbstract()) {
+                continue;
+            }
+
+            if (str_ends_with($summary->shortName(), 'Controller') || $file->type === 'controller') {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
