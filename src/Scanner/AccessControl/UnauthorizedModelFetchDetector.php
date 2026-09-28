@@ -140,6 +140,18 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
     private const MUTATION_METHODS = ['update' => 'update', 'delete' => 'delete', 'forcedelete' => 'forceDelete'];
 
     /**
+     * Lower-cased calls that delete or update a route-bound record in place,
+     * including the quiet and exception-throwing variants Eloquent ships.
+     *
+     * @var array<int, string>
+     */
+    private const BINDING_WRITE_METHODS = [
+        'delete', 'deletequietly', 'deleteorfail',
+        'forcedelete', 'forcedeletequietly',
+        'update', 'updatequietly', 'updateorfail',
+    ];
+
+    /**
      * Chain links that key a query on the primary key.
      *
      * @var array<int, string>
@@ -832,11 +844,13 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
     }
 
     /**
-     * Examine one route-model-bound parameter that the action hands back.
+     * Examine one route-model-bound parameter that the action hands back, or
+     * deletes or updates.
      *
      * This is only ever a REVIEW item. Implicit binding resolves ANY row by
-     * key, so an unguarded `show(Invoice $invoice) { return $invoice; }` is the
-     * textbook IDOR — but a binding can be customised in places this detector
+     * key, so an unguarded `show(Invoice $invoice) { return $invoice; }` — or
+     * `destroy(Invoice $invoice) { $invoice->delete(); }`, its write-side
+     * twin — is the textbook IDOR. But a binding can be customised in places this detector
      * does not read in full (`Route::bind()`, `scopeBindings()`, an explicit
      * binding in a provider), so absence of authorization is never asserted.
      * Beyond the method-level guards already checked by the caller, it
@@ -877,6 +891,14 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
             }
         }
 
+        // A write outranks a read: an action that deletes the record and then
+        // returns it is described by what it does to the row, not by the echo.
+        $write = $this->bindingWriteSink($method, $binding['name']);
+
+        if ($write !== null) {
+            return $this->reportBindingWrite($parsed, $class, $method, $binding, $entry, $write['line'], $write['verb']);
+        }
+
         $line = $this->exposingReturnLine($method, $binding['name'], $semantic);
 
         if ($line === null) {
@@ -908,6 +930,99 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
                 $model,
                 $class->shortName(),
                 $method->name(),
+            ),
+            fix: '',
+            findingClass: FindingClass::Review,
+            confidence: Confidence::Possible,
+        );
+    }
+
+    /**
+     * The first method-scope `delete()`/`update()`-family call made directly on
+     * the bound variable, or null.
+     *
+     * Only the variable itself counts as the receiver: `$invoice->items()->delete()`
+     * writes a relation of the bound record, which is a different question, and
+     * a call inside a closure runs in a scope this detector does not model.
+     *
+     * @return array{line: int, verb: string}|null
+     */
+    private function bindingWriteSink(MethodShape $method, string $variable): ?array
+    {
+        $statements = $method->statements();
+
+        if ($statements === []) {
+            return null;
+        }
+
+        foreach ((new NodeFinder)->findInstanceOf($statements, Node\Expr\MethodCall::class) as $call) {
+            if (! $call->var instanceof Node\Expr\Variable
+                || $call->var->name !== $variable
+                || ! $call->name instanceof Node\Identifier
+                || $this->isInsideNestedScope($call)) {
+                continue;
+            }
+
+            $verb = $call->name->toString();
+
+            if (in_array(strtolower($verb), self::BINDING_WRITE_METHODS, true)) {
+                return ['line' => $call->getStartLine(), 'verb' => $verb];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The review item for a route-bound record the action deletes or updates.
+     *
+     * Raised at High rather than the read path's Medium: if real, any caller
+     * can destroy or rewrite any row. It stays a question for the same reason
+     * the read path does — binding resolution can be customised outside the
+     * code this scan reads — so it never counts, scores or carries a fix.
+     *
+     * @param  array{name: string, model: string}  $binding
+     * @param  array{verdict: string, route: string|null, middleware: array<int, string>}  $entry
+     */
+    private function reportBindingWrite(
+        ParsedFile $parsed,
+        ClassShape $class,
+        MethodShape $method,
+        array $binding,
+        array $entry,
+        int $line,
+        string $verb,
+    ): Vulnerability {
+        $model = TypeNames::shortName($binding['model']);
+        $action = str_starts_with(strtolower($verb), 'update') ? 'modify' : 'delete';
+
+        return new Vulnerability(
+            type: VulnerabilityType::Idor,
+            location: $parsed->path,
+            line: $line,
+            severity: SeverityLevel::High,
+            description: sprintf(
+                'Can any caller who reaches `%s` %s any %s? %s::%s() receives $%s through route-model binding, which loads whichever row the URL names, and calls ->%s() on it on line %d with no authorization in between. Route bindings can be customised outside the code this scan reads, so this is raised for review rather than reported as a proven IDOR.',
+                (string) $entry['route'],
+                $action,
+                $model,
+                $class->shortName(),
+                $method->name(),
+                $binding['name'],
+                $verb,
+                $line,
+            ),
+            proof: sprintf(
+                '$%s is bound from the `{%s}` segment of the route `%s`, whose middleware is [%s] — authentication and plumbing only, no authorization. %s is present in this scan, registers no global scope, does not override resolveRouteBinding(), and has an owner. %s::%s() invokes no $this->authorize()/Gate::/->can() call or permission helper, no ancestor constructor registers authorization middleware or calls authorizeResource(), the controller declares no static middleware(), no injected form request authorises the call, and the record is never compared against the authenticated user before $%s->%s().',
+                $binding['name'],
+                $binding['name'],
+                (string) $entry['route'],
+                $entry['middleware'] === [] ? 'none' : implode(', ', $entry['middleware']),
+                $model,
+                $class->shortName(),
+                $method->name(),
+                $binding['name'],
+                $verb,
             ),
             fix: '',
             findingClass: FindingClass::Review,

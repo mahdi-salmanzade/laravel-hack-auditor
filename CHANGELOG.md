@@ -5,6 +5,17 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Route-bound writes without authorization are now raised for review.** `destroy(Invoice $invoice) { $invoice->delete(); }` — and `forceDelete()`, `deleteOrFail()`, `update($request->all())` and their quiet variants called on the bound record — on a confirmed single-segment route with no authorization anywhere (no `authorize()`/`Gate::`/`can:` middleware, `authorizeResource()`, static `middleware()`, authorising form request or ownership comparison) is a **review** item at High severity: any caller who can reach the route may be able to delete or rewrite any row. It closes the known limit listed for v2.3.0, where the binding rule covered only records handed back to the client. It is never an asserted vulnerability and never carries a fix, for the same reason as the read path: implicit binding can be customised outside the code the scan reads. When an action both writes and returns the bound record, the write is what is reported.
+
+### Measured Impact
+
+- **No change on real code.** Re-run over the same six applications (4,769 files) in both route modes: findings identical to v2.3.0 in all 12 runs — 0 asserted, 28 review items without a route map, 3 with one. The corpora hold 53 controllers with a route-bound write shape; every one is guarded (spot-checked: koel's `UserController::destroy` and `PlaylistSongController::destroy` both call `$this->authorize()`), and the rule stays silent on all of them.
+- 15 new tests: 5 flagged shapes, 9 guarded or unprovable variants that must stay silent (each differing from a flagged fixture by exactly one link), and the no-route-table case.
+
 ## [2.3.0] - 2026-09-28
 
 A full audit of the package — detection engine, AI pipeline, reporting surface — against its own promises. It found a privacy leak, wrong line numbers on every finding in any file with a docblock, a declared dependency that could not be installed, and a dozen places where a failure was reported as a clean result. All of them are fixed here, and the scanner gains an offline mode that needs no API key.

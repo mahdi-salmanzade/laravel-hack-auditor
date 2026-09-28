@@ -8,6 +8,7 @@ use Mahdi\HackAuditor\Scanner\AccessControl\UnauthorizedModelFetchDetector;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Support\Confidence;
 use Mahdi\HackAuditor\Support\FindingClass;
+use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
 
 /**
@@ -413,3 +414,149 @@ it('suggests authorize() for a write only with the matching declared ability and
     'policy declares delete' => ['delete', true],
     'policy declares only view' => ['view', false],
 ]);
+
+// ---------------------------------------------------------------------------
+// Route-model binding: write side
+// ---------------------------------------------------------------------------
+
+it('raises an unguarded route-model-bound record that is deleted or updated for review only', function (string $method, string $route, string $body, int $line, string $verb): void {
+    $files = writeBindingFiles($body);
+
+    $findings = writeBindingScan($files, writeBindingRoutes($method, $route));
+
+    expect($findings)->toHaveCount(1)
+        ->and($findings[0]->type)->toBe(VulnerabilityType::Idor)
+        ->and($findings[0]->findingClass)->toBe(FindingClass::Review)
+        ->and($findings[0]->confidence)->toBe(Confidence::Possible)
+        ->and($findings[0]->severity)->toBe(SeverityLevel::High)
+        ->and($findings[0]->fix)->toBe('')
+        ->and($findings[0]->line)->toBe($line)
+        ->and($findings[0]->description)->toContain("->{$verb}()")
+        ->and($findings[0]->description)->toContain('route-model binding');
+})->with([
+    'destroy with delete()' => ['destroy', 'DELETE invoices/{invoice}', <<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->delete();
+
+            return redirect('/invoices');
+        }
+    PHP, 11, 'delete'],
+    'destroy with forceDelete()' => ['destroy', 'DELETE invoices/{invoice}', <<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->forceDelete();
+
+            return response()->noContent();
+        }
+    PHP, 11, 'forceDelete'],
+    'destroy with deleteOrFail()' => ['destroy', 'DELETE invoices/{invoice}', <<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->deleteOrFail();
+
+            return response()->noContent();
+        }
+    PHP, 11, 'deleteOrFail'],
+    'update from the request' => ['update', 'PUT invoices/{invoice}', <<<'PHP'
+        public function update(Request $request, Invoice $invoice)
+        {
+            $invoice->update($request->all());
+
+            return $invoice;
+        }
+    PHP, 11, 'update'],
+    'deleted then returned is reported as the write' => ['destroy', 'DELETE invoices/{invoice}', <<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->delete();
+
+            return $invoice;
+        }
+    PHP, 11, 'delete'],
+]);
+
+it('stays silent on a guarded or unprovable route-bound delete', function (string $body, string $route, string $middleware, string $model = ''): void {
+    $files = writeBindingFiles($body, model: $model);
+
+    expect(writeBindingDescribe(writeBindingScan($files, writeBindingRoutes('destroy', $route, explode(',', $middleware)))))->toBe([]);
+})->with([
+    'authorize()' => [<<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $this->authorize('delete', $invoice);
+
+            $invoice->delete();
+        }
+    PHP, 'DELETE invoices/{invoice}', 'web,auth'],
+    'Gate::authorize' => [<<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            Gate::authorize('delete', $invoice);
+
+            $invoice->delete();
+        }
+    PHP, 'DELETE invoices/{invoice}', 'web,auth'],
+    'can: middleware' => [<<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->delete();
+        }
+    PHP, 'DELETE invoices/{invoice}', 'web,auth,can:delete,invoice'],
+    'authorizeResource in constructor' => [<<<'PHP'
+        public function __construct()
+        {
+            $this->authorizeResource(Invoice::class, 'invoice');
+        }
+
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->delete();
+        }
+    PHP, 'DELETE invoices/{invoice}', 'web,auth'],
+    'ownership comparison' => [<<<'PHP'
+        public function destroy(Request $request, Invoice $invoice)
+        {
+            abort_unless($invoice->user_id === $request->user()->id, 403);
+
+            $invoice->delete();
+        }
+    PHP, 'DELETE invoices/{invoice}', 'web,auth'],
+    'custom resolveRouteBinding' => [<<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->delete();
+        }
+    PHP, 'DELETE invoices/{invoice}', 'web,auth', "    public function resolveRouteBinding(\$value, \$field = null)\n    {\n        return \$this->where('user_id', auth()->id())->findOrFail(\$value);\n    }\n"],
+    'nested (possibly scoped) binding' => [<<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->delete();
+        }
+    PHP, 'DELETE teams/{team}/invoices/{invoice}', 'web,auth'],
+    'a relation of the record is written, not the record' => [<<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->lines()->delete();
+
+            return response()->noContent();
+        }
+    PHP, 'DELETE invoices/{invoice}/lines', 'web,auth'],
+    'unrouted action' => [<<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->delete();
+        }
+    PHP, 'DELETE invoices/{invoice}', 'web,auth,admin'],
+]);
+
+it('stays silent on a route-bound delete when no route table is known', function (): void {
+    $files = writeBindingFiles(<<<'PHP'
+        public function destroy(Invoice $invoice)
+        {
+            $invoice->delete();
+        }
+    PHP);
+
+    expect(writeBindingScan($files, new AccessControlContext))->toBe([]);
+});
