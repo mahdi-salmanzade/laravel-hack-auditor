@@ -174,3 +174,22 @@ it('handles corrupted json gracefully', function (): void {
 
     expect($history->all())->toBe([]);
 });
+
+it('never writes an empty file when the data contains invalid UTF-8', function (): void {
+    $history = new ScanHistory($this->tempDir);
+
+    $id = $history->save(['summary' => "caf\xE9", 'vulnerabilities' => []]);
+
+    $contents = file_get_contents($this->tempDir.'/'.$id.'.json');
+
+    expect($contents)->not->toBe('')
+        ->and($history->find($id))->toBeArray()
+        ->and($history->find($id)['summary'])->toStartWith('caf');
+});
+
+it('writes nothing and throws when the data cannot be encoded at all', function (): void {
+    $history = new ScanHistory($this->tempDir);
+
+    expect(fn () => $history->save(['score' => NAN]))->toThrow(JsonException::class)
+        ->and($history->count())->toBe(0);
+});

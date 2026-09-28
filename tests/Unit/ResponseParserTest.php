@@ -100,23 +100,23 @@ it('throws InvalidAIResponseException when vulnerabilities field is missing', fu
     $this->parser->parse($response);
 })->throws(InvalidAIResponseException::class, 'vulnerabilities');
 
-it('throws InvalidAIResponseException when overall_score field is missing', function (): void {
+it('derives overall_score from the findings when the field is missing', function (): void {
     $response = json_encode([
         'vulnerabilities' => [],
         'summary' => 'Clean.',
     ], JSON_THROW_ON_ERROR);
 
-    $this->parser->parse($response);
-})->throws(InvalidAIResponseException::class, 'overall_score');
+    expect($this->parser->parse($response)->overallScore)->toBe(100);
+});
 
-it('throws InvalidAIResponseException when summary field is missing', function (): void {
+it('defaults a missing summary to an empty string', function (): void {
     $response = json_encode([
         'vulnerabilities' => [],
         'overall_score' => 100,
     ], JSON_THROW_ON_ERROR);
 
-    $this->parser->parse($response);
-})->throws(InvalidAIResponseException::class, 'summary');
+    expect($this->parser->parse($response)->summary)->toBe('');
+});
 
 it('throws InvalidAIResponseException when vulnerabilities is not an array', function (): void {
     $response = json_encode([
@@ -128,7 +128,7 @@ it('throws InvalidAIResponseException when vulnerabilities is not an array', fun
     $this->parser->parse($response);
 })->throws(InvalidAIResponseException::class, 'vulnerabilities');
 
-it('throws InvalidAIResponseException when vulnerability type field is missing', function (): void {
+it('skips a finding whose type field is missing instead of failing the chunk', function (): void {
     $response = json_encode([
         'vulnerabilities' => [
             [
@@ -144,10 +144,11 @@ it('throws InvalidAIResponseException when vulnerability type field is missing',
         'summary' => 'Issues found.',
     ], JSON_THROW_ON_ERROR);
 
-    $this->parser->parse($response);
-})->throws(InvalidAIResponseException::class, 'type');
+    expect($this->parser->parse($response)->vulnerabilities)->toBe([])
+        ->and($this->parser->lastSkippedFindings()[0])->toContain('type');
+});
 
-it('throws InvalidAIResponseException for invalid vulnerability type string', function (): void {
+it('skips a finding with an unknown vulnerability type instead of failing the chunk', function (): void {
     $response = json_encode([
         'vulnerabilities' => [
             [
@@ -164,8 +165,9 @@ it('throws InvalidAIResponseException for invalid vulnerability type string', fu
         'summary' => 'Issues found.',
     ], JSON_THROW_ON_ERROR);
 
-    $this->parser->parse($response);
-})->throws(InvalidAIResponseException::class, 'totally_fake_vulnerability');
+    expect($this->parser->parse($response)->vulnerabilities)->toBe([])
+        ->and($this->parser->lastSkippedFindings()[0])->toContain('totally_fake_vulnerability');
+});
 
 it('handles case-insensitive vulnerability type via enum name', function (): void {
     $response = json_encode([
@@ -247,25 +249,25 @@ it('clamps overall_score to 0-100 range', function (): void {
         ->and($reportLow->overallScore)->toBe(0);
 });
 
-it('throws InvalidAIResponseException when overall_score is not numeric', function (): void {
+it('derives overall_score from the findings when it is not numeric', function (): void {
     $response = json_encode([
         'vulnerabilities' => [],
         'overall_score' => 'not a number',
         'summary' => 'Score is invalid.',
     ], JSON_THROW_ON_ERROR);
 
-    $this->parser->parse($response);
-})->throws(InvalidAIResponseException::class, 'overall_score');
+    expect($this->parser->parse($response)->overallScore)->toBe(100);
+});
 
-it('throws InvalidAIResponseException when summary is not a string', function (): void {
+it('defaults a non-string summary to an empty string', function (): void {
     $response = json_encode([
         'vulnerabilities' => [],
         'overall_score' => 100,
         'summary' => 12345,
     ], JSON_THROW_ON_ERROR);
 
-    $this->parser->parse($response);
-})->throws(InvalidAIResponseException::class, 'summary');
+    expect($this->parser->parse($response)->summary)->toBe('');
+});
 
 it('handles missing ctf_idea field gracefully as empty string', function (): void {
     $response = json_encode([
@@ -322,7 +324,7 @@ it('parses multiple vulnerabilities correctly', function (): void {
         ->and($report->vulnerabilities[2]->type)->toBe(VulnerabilityType::Csrf);
 });
 
-it('throws InvalidAIResponseException when vulnerability location is not a string', function (): void {
+it('skips a finding whose location is not a string instead of failing the chunk', function (): void {
     $response = json_encode([
         'vulnerabilities' => [
             [
@@ -339,8 +341,9 @@ it('throws InvalidAIResponseException when vulnerability location is not a strin
         'summary' => 'Issues found.',
     ], JSON_THROW_ON_ERROR);
 
-    $this->parser->parse($response);
-})->throws(InvalidAIResponseException::class, 'location');
+    expect($this->parser->parse($response)->vulnerabilities)->toBe([])
+        ->and($this->parser->lastSkippedFindings()[0])->toContain('location');
+});
 
 it('accepts float line numbers and casts to int', function (): void {
     $response = json_encode([

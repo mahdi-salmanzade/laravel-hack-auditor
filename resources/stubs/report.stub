@@ -113,14 +113,14 @@ body {
     stroke: {{SCORE_COLOR}};
     stroke-width: 10;
     stroke-linecap: round;
-    stroke-dasharray: 502.65;
-    stroke-dashoffset: 502.65;
+    stroke-dasharray: {{RING_CIRCUMFERENCE}};
+    stroke-dashoffset: {{RING_CIRCUMFERENCE}};
     animation: scoreReveal 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
     filter: drop-shadow(0 0 8px {{SCORE_COLOR}}40);
 }
 
 @keyframes scoreReveal {
-    from { stroke-dashoffset: 502.65; }
+    from { stroke-dashoffset: {{RING_CIRCUMFERENCE}}; }
     to { stroke-dashoffset: {{STROKE_OFFSET}}; }
 }
 
@@ -1003,9 +1003,12 @@ function showCopied(btn) {
 }
 
 function copyForAI() {
-    var findings = document.querySelectorAll('.finding-card');
+    // Confirmed vulnerabilities only. Review cards are questions, not findings;
+    // handing them to an AI as "vulnerabilities to fix" invites invented fixes.
+    var findings = document.querySelectorAll('.finding-card:not(.review-card)');
     var lines = [];
 
+    var scoreMeaningful = {{SCORE_MEANINGFUL}};
     var score = document.querySelector('.score-number').textContent.trim();
     var chips = document.querySelectorAll('.chip');
     var severityCounts = [];
@@ -1018,7 +1021,9 @@ function copyForAI() {
     lines.push('# Security Audit Findings');
     lines.push('');
     lines.push('The following vulnerabilities were found by Laravel Hack Auditor (AI-powered security scanner).');
-    lines.push('Score: ' + score + '/100 — ' + findings.length + ' issues found (' + severityCounts.join(', ') + ').');
+    var scoreText = scoreMeaningful ? ('Score: ' + score + '/100') : 'Score: withheld (incomplete coverage)';
+    lines.push(scoreText + ' — ' + findings.length + ' confirmed vulnerabilities (' + (severityCounts.length ? severityCounts.join(', ') : 'none') + ').');
+    lines.push('Items flagged "needs review" are intentionally excluded: they are questions, not findings.');
     lines.push('');
     lines.push('Please analyze each vulnerability below and provide the fix. For each one:');
     lines.push('1. Confirm if the vulnerability is valid in the context of a Laravel application');

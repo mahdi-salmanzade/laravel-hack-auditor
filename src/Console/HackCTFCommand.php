@@ -22,7 +22,7 @@ final class HackCTFCommand extends Command
     protected $signature = 'hack:ctf
         {vulnerability? : Specific vulnerability type}
         {--from-scan : Use latest scan results}
-        {--all : Generate CTF for every finding}';
+        {--all : Generate a CTF for every finding in the latest saved scan (implies --from-scan)}';
 
     /**
      * The console command description.
@@ -38,7 +38,10 @@ final class HackCTFCommand extends Command
     {
         $this->displayBanner();
 
-        if ($this->option('from-scan')) {
+        // --all only has meaning over scan findings. It used to be silently
+        // ignored without --from-scan, dropping the user into the interactive
+        // menu instead of doing what the flag says.
+        if ($this->option('from-scan') || $this->option('all')) {
             return $this->handleFromScan();
         }
 

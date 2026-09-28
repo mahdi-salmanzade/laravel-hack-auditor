@@ -116,3 +116,26 @@ it('help report deep dive works', function (): void {
         ->expectsOutputToContain('--latest')
         ->expectsOutputToContain('--id');
 });
+
+it('help has usage and benchmark topics', function (string $topic, string $needle): void {
+    $this->artisan('hack:help', ['topic' => $topic])
+        ->expectsOutputToContain($needle)
+        ->assertSuccessful();
+})->with([
+    ['usage', 'hack:usage'],
+    ['benchmark', 'hack:benchmark'],
+]);
+
+it('help overview lists hack:benchmark', function (): void {
+    $this->artisan('hack:help')->expectsOutputToContain('hack:benchmark');
+});
+
+it('help scan documents the new flags and exit code 2', function (): void {
+    $this->artisan('hack:help', ['topic' => 'scan'])
+        ->expectsOutputToContain('--fail-on')
+        ->expectsOutputToContain('--format')
+        ->expectsOutputToContain('--verify')
+        ->expectsOutputToContain('Show suggested fixes')
+        ->expectsOutputToContain('Invalid usage, or the scan target was missing/refused')
+        ->doesntExpectOutputToContain('AI-generated fix suggestions');
+});

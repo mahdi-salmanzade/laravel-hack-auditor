@@ -59,6 +59,38 @@ final class ScanCoverage
     }
 
     /**
+     * Rebuild a coverage record from the array toArray() produced.
+     *
+     * Tolerates missing or malformed keys: a saved scan from an older version
+     * must still regenerate, and must keep withholding a score it withheld.
+     *
+     * @param  array<mixed>  $data
+     */
+    public static function fromArray(array $data): self
+    {
+        $skipped = [];
+
+        if (is_array($data['skipped_files'] ?? null)) {
+            foreach ($data['skipped_files'] as $entry) {
+                if (! is_array($entry)) {
+                    continue;
+                }
+
+                $skipped[] = [
+                    'path' => is_scalar($entry['path'] ?? null) ? (string) $entry['path'] : 'unknown',
+                    'reason' => is_scalar($entry['reason'] ?? null) ? (string) $entry['reason'] : self::REASON_AI_FAILURE,
+                ];
+            }
+        }
+
+        return new self(
+            filesDiscovered: is_numeric($data['files_discovered'] ?? null) ? (int) $data['files_discovered'] : 0,
+            filesAnalyzed: is_numeric($data['files_analyzed'] ?? null) ? (int) $data['files_analyzed'] : 0,
+            skipped: $skipped,
+        );
+    }
+
+    /**
      * Number of discovered files that never reached the analyzer.
      */
     public function filesSkipped(): int

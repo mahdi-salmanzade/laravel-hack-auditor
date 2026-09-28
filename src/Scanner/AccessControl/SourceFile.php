@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\Scanner\AccessControl;
 
+use Mahdi\HackAuditor\Scanner\CodeExtractor;
+
 /**
  * Lightweight value object wrapping a single source file for access-control
  * analysis. Provides helpers for line-number resolution and class detection
@@ -66,14 +68,13 @@ final class SourceFile
 
     /**
      * Extract the short class name declared in the file, if any.
+     *
+     * Read from tokens, never a regex: `/class\s+(\w+)/` matched the word
+     * "class" inside comments and strings.
      */
     public function className(): ?string
     {
-        if (preg_match('/\bclass\s+(\w+)/', $this->content, $match)) {
-            return $match[1];
-        }
-
-        return null;
+        return CodeExtractor::classDeclaration($this->content)['class'] ?? null;
     }
 
     /**
@@ -81,16 +82,6 @@ final class SourceFile
      */
     public function fqcn(): ?string
     {
-        $class = $this->className();
-
-        if ($class === null) {
-            return null;
-        }
-
-        if (preg_match('/namespace\s+([^;]+);/', $this->content, $match)) {
-            return trim($match[1]).'\\'.$class;
-        }
-
-        return $class;
+        return CodeExtractor::classDeclaration($this->content)['fqcn'] ?? null;
     }
 }

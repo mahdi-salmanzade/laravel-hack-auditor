@@ -218,7 +218,9 @@ it('strips multi-line comments but preserves single-line comments', function ():
         ->and($result['content'])->not->toContain('inline block comment removed');
 });
 
-it('collapses excessive blank lines', function (): void {
+it('preserves blank lines so every line keeps its on-disk number', function (): void {
+    // Collapsing blank runs used to shift every line below them, so findings
+    // pointed at the wrong line. Line N of the extract must be line N on disk.
     $filePath = $this->tempDir.'/SpacedOut.php';
     $content = "<?php\n\nclass A {\n\n\n\n\n\npublic function b() {}\n\n\n\n\n}";
     file_put_contents($filePath, $content);
@@ -226,8 +228,7 @@ it('collapses excessive blank lines', function (): void {
     $file = new SplFileInfo($filePath);
     $result = $this->extractor->extract($file);
 
-    // After cleaning, no more than 2 consecutive newlines
-    expect($result['content'])->not->toContain("\n\n\n");
+    expect($result['content'])->toBe($content);
 });
 
 it('returns empty content and other type for files with unresolvable path', function (): void {

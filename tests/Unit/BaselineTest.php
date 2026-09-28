@@ -72,7 +72,7 @@ it('saves a baseline file with correct JSON format', function (): void {
 
     expect($contents)->toBeArray()
         ->toHaveCount(1)
-        ->and($contents[0])->toHaveKeys(['file', 'line', 'type', 'hash'])
+        ->and($contents[0])->toHaveKeys(['fingerprint', 'file', 'line', 'type', 'hash'])
         ->and($contents[0]['file'])->toBe('app/Http/Controllers/UserController.php')
         ->and($contents[0]['line'])->toBe(42)
         ->and($contents[0]['type'])->toBe('sql_injection')
@@ -121,9 +121,15 @@ it('contains matches by file, type, and hash', function (): void {
     $differentFileVuln = makeVulnerability(location: 'app/Models/User.php');
     expect($baseline->contains($differentFileVuln))->toBeFalse();
 
-    // Different description (different hash) should not be contained
-    $differentDescVuln = makeVulnerability(description: 'Completely different issue.');
-    expect($baseline->contains($differentDescVuln))->toBeFalse();
+    // A reworded description is the SAME finding: the AI rewords between runs,
+    // and matching on the description made accepted findings come back as new.
+    $rewordedVuln = makeVulnerability(description: 'Completely different wording.');
+    expect($baseline->contains($rewordedVuln))->toBeTrue();
+
+    // A different flagged line (file unreadable here, so the line number is the
+    // anchor) is a different finding.
+    $differentLineVuln = makeVulnerability(line: 99);
+    expect($baseline->contains($differentLineVuln))->toBeFalse();
 });
 
 it('filters vulnerabilities returning new findings and suppressed count', function (): void {
@@ -174,4 +180,58 @@ it('loads gracefully when file does not exist', function (): void {
     $vuln = makeVulnerability();
 
     expect($baseline->contains($vuln))->toBeFalse();
+});
+
+it('saves a fingerprint on every entry', function (): void {
+    $vuln = makeVulnerability();
+    $report = new VulnerabilityReport([$vuln], 25, '', '');
+
+    (new Baseline)->save($report, $this->baselinePath);
+    $contents = json_decode(file_get_contents($this->baselinePath), true);
+
+    expect($contents[0]['fingerprint'])->toBe($report->fingerprintOf($vuln));
+});
+
+it('still honours a legacy baseline file written without fingerprints', function (): void {
+    file_put_contents($this->baselinePath, json_encode([[
+        'file' => 'app/Http/Controllers/UserController.php',
+        'line' => 42,
+        'type' => 'sql_injection',
+        'hash' => md5('Raw SQL query with user input.'),
+    ]]));
+
+    $baseline = (new Baseline)->load($this->baselinePath);
+
+    expect($baseline->contains(makeVulnerability()))->toBeTrue()
+        ->and($baseline->contains(makeVulnerability(description: 'Reworded.')))->toBeFalse();
+});
+
+it('tolerates malformed baseline entries without errors', function (): void {
+    file_put_contents($this->baselinePath, json_encode([
+        'not-an-array',
+        ['file' => 'app/Http/Controllers/UserController.php'],
+        ['type' => 'sql_injection', 'hash' => 42],
+        ['fingerprint' => ['nested']],
+        null,
+    ]));
+
+    $baseline = (new Baseline)->load($this->baselinePath);
+
+    expect($baseline->contains(makeVulnerability()))->toBeFalse()
+        ->and($baseline->filter([makeVulnerability()])['suppressed'])->toBe(0);
+});
+
+it('matches duplicate findings one-to-one when filtering through the owning report', function (): void {
+    $first = makeVulnerability(description: 'one');
+    $second = makeVulnerability(description: 'two');
+
+    // Only the first of two otherwise-identical findings was accepted.
+    $accepted = new VulnerabilityReport([$first], 25, '', '');
+    (new Baseline)->save($accepted, $this->baselinePath);
+
+    $current = new VulnerabilityReport([$first, $second], 25, '', '');
+    $result = (new Baseline)->load($this->baselinePath)->filter($current->vulnerabilities, $current);
+
+    expect($result['suppressed'])->toBe(1)
+        ->and($result['new'])->toBe([$second]);
 });

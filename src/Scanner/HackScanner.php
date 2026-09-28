@@ -22,6 +22,11 @@ use SplFileInfo;
 final class HackScanner implements ScannerInterface
 {
     /**
+     * The synthetic path scanCode() gives a raw code string.
+     */
+    private const string INLINE_CODE_PATH = 'inline-code.php';
+
+    /**
      * Create a new HackScanner instance with all required dependencies.
      */
     public function __construct(
@@ -53,6 +58,33 @@ final class HackScanner implements ScannerInterface
     private array $skippedFiles = [];
 
     private bool $verify = false;
+
+    private bool $deterministic = false;
+
+    private bool $lastChunkTruncated = false;
+
+    /**
+     * Run only the deterministic access-control engine — no AI request is made.
+     *
+     * The AST-based detectors need no API key, no network and cost nothing,
+     * and their output is reproducible run to run, so this mode can gate every
+     * commit. It does not look for what only the AI pass finds (SQL injection,
+     * XSS, command injection and the rest); the report summary says so.
+     */
+    public function setDeterministic(bool $deterministic): self
+    {
+        $this->deterministic = $deterministic;
+
+        return $this;
+    }
+
+    /**
+     * Whether this scanner runs the deterministic engine only.
+     */
+    public function isDeterministic(): bool
+    {
+        return $this->deterministic;
+    }
 
     /**
      * Enable or disable multi-pass exploit verification for HIGH+ findings.
@@ -134,12 +166,12 @@ final class HackScanner implements ScannerInterface
             : base_path($path);
 
         if (! file_exists($absolutePath)) {
-            return $this->attachScanState(new VulnerabilityReport(
+            return $this->attachScanState((new VulnerabilityReport(
                 vulnerabilities: [],
                 overallScore: 100,
                 summary: "File not found: {$path}",
                 ctfIdea: '',
-            ));
+            ))->setTargetError("File not found: {$path}"));
         }
 
         if (($refusal = $this->guardScanPath($absolutePath, $path)) !== null) {
@@ -164,7 +196,7 @@ final class HackScanner implements ScannerInterface
 
         try {
             $report = $this->analyzeFiles([$extracted]);
-            $this->filesAnalyzed = 1;
+            $this->recordAnalysedChunk([$extracted], $report);
         } catch (\Throwable $e) {
             $this->chunksFailedParse++;
             $this->recordSkippedFile($extracted['path'], ScanCoverage::REASON_AI_FAILURE);
@@ -190,6 +222,64 @@ final class HackScanner implements ScannerInterface
     }
 
     /**
+     * Scan only the PHP files changed on the current branch versus a base.
+     *
+     * Used by `hack:scan --diff`, the MCP `scan_diff` tool and, through them,
+     * the GitHub Action. Both callers used to loop scanFile() over the changed
+     * files, which cost one AI request per file instead of one per chunk, handed
+     * the deterministic engine one file at a time, averaged per-file scores, and
+     * rebuilt the report without its verification counts — so `--diff --verify`
+     * reported zero verified findings however many it had paid to verify. The
+     * changed files now go through the same collection pipeline as a full scan.
+     *
+     * A diff that cannot be computed is a target error, never an empty diff.
+     *
+     * @param  string|null  $baseBranch  Base to diff against; null auto-detects main/master.
+     * @param  string|null  $path  Optional app-relative file or directory to narrow the diff to.
+     */
+    public function scanDiff(?string $baseBranch = null, ?string $path = null, ?GitDiffCollector $collector = null): VulnerabilityReport
+    {
+        $this->resetCoverage();
+
+        $collector ??= app(GitDiffCollector::class);
+
+        try {
+            $changed = $collector->getChangedFiles($baseBranch, $path);
+        } catch (\Throwable $e) {
+            return $this->attachScanState(
+                (new VulnerabilityReport(
+                    vulnerabilities: [],
+                    overallScore: 100,
+                    summary: "Could not compute the git diff: {$e->getMessage()}",
+                    ctfIdea: '',
+                ))->setTargetError($e->getMessage()),
+            );
+        }
+
+        $base = $collector->resolvedBase() ?? $baseBranch ?? 'main';
+
+        $files = collect();
+
+        foreach ($changed as $absolutePath) {
+            // The collector already applies scan paths and sensitive patterns;
+            // this repeats the read-path guard that every other entry point runs,
+            // so a symlink in the diff cannot point the scan outside the app.
+            if ($this->guardScanPath($absolutePath, $absolutePath) !== null) {
+                $this->recordSkippedFile($absolutePath, ScanCoverage::REASON_UNREADABLE);
+
+                continue;
+            }
+
+            $files->push(new SplFileInfo($absolutePath));
+        }
+
+        return $this->scanCollection(
+            $files,
+            "No changed PHP files found compared to {$base}.",
+        );
+    }
+
+    /**
      * Chunk, analyse and merge a collection of files, tracking coverage.
      *
      * Shared by the full-application scan and by `--path=<directory>` so both
@@ -200,7 +290,9 @@ final class HackScanner implements ScannerInterface
      */
     private function scanCollection(Collection $files, string $emptyMessage): VulnerabilityReport
     {
-        $this->filesDiscovered = $files->count();
+        // Files refused before collection (see scanDiff) were discovered too;
+        // leaving them out would let a refused file read as full coverage.
+        $this->filesDiscovered = $files->count() + count($this->skippedFiles);
 
         if ($files->isEmpty()) {
             return $this->attachScanState(new VulnerabilityReport(
@@ -252,6 +344,8 @@ final class HackScanner implements ScannerInterface
      */
     private function attachScanState(VulnerabilityReport $report): VulnerabilityReport
     {
+        $report = $this->withComputedScore($report);
+
         if ($this->usageTracker !== null) {
             $report->setUsageTracker($this->usageTracker);
         }
@@ -259,6 +353,120 @@ final class HackScanner implements ScannerInterface
         $report->setCoverage($this->getCoverage());
 
         return $report;
+    }
+
+    /**
+     * Rebuild the report with its score computed from its confirmed findings.
+     *
+     * The score is documented as penalty-only — 100 minus each asserted
+     * finding's severity weight — but was the AI's self-reported number,
+     * averaged across chunks and then docked for deterministic findings. The
+     * averaging diluted it: one chunk holding a critical among ten clean ones
+     * read about 96. It also varied run to run with identical findings. It is
+     * now a pure function of what the report asserts, so the same findings
+     * always produce the same score and the breakdown can explain it.
+     */
+    private function withComputedScore(VulnerabilityReport $report): VulnerabilityReport
+    {
+        $penalty = 0;
+
+        foreach ($report->confirmedVulnerabilities() as $vulnerability) {
+            $penalty += $vulnerability->severity->weight();
+        }
+
+        $score = max(0, 100 - $penalty);
+
+        $summary = $report->summary;
+
+        if ($this->deterministic) {
+            $note = 'Deterministic scan: only the reproducible access-control engine ran (IDOR, '
+                .'unauthorized model access, policy/route mismatch, mass assignment, SSRF, sensitive '
+                .'data exposure). No AI request was made, so injection, XSS and other AI-detected '
+                .'classes were not looked for.';
+            $summary = $summary === '' ? $note : $summary."\n\n".$note;
+        }
+
+        if ($score === $report->overallScore && $summary === $report->summary) {
+            return $report;
+        }
+
+        $rebuilt = new VulnerabilityReport(
+            vulnerabilities: $report->vulnerabilities,
+            overallScore: $score,
+            summary: $summary,
+            ctfIdea: $report->ctfIdea,
+            verificationAttempted: $report->verificationAttempted,
+            verifiedCount: $report->verifiedCount,
+            downgradedCount: $report->downgradedCount,
+            verificationInputTokens: $report->verificationInputTokens,
+            verificationOutputTokens: $report->verificationOutputTokens,
+        );
+
+        $rebuilt->inheritScanStateFrom($report);
+
+        if ($report->getTargetError() !== null) {
+            $rebuilt->setTargetError($report->getTargetError());
+        }
+
+        return $rebuilt;
+    }
+
+    /**
+     * Parse one chunk's AI response against the files that were sent.
+     *
+     * Passing the chunk lets the parser pin each finding to a file that was
+     * actually sent and clamp its line to that file's length, rather than
+     * trusting a location and line the model may have invented.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $files
+     */
+    private function parseChunkResponse(string $response, array $files): VulnerabilityReport
+    {
+        // Inline code has no file behind it, so there is nothing to pin to.
+        $isInline = count($files) === 1 && $files[0]['path'] === self::INLINE_CODE_PATH;
+
+        $report = $this->responseParser->parse($response, $isInline ? [] : $files);
+
+        $this->lastChunkTruncated = $this->responseParser->lastParseWasTruncated();
+
+        return $report;
+    }
+
+    /**
+     * Count a chunk's files as analysed — unless its response was cut off.
+     *
+     * A response truncated at max_tokens still yields every finding that was
+     * complete, but nothing proves the model reached the files it never
+     * mentioned. Those are recorded as skipped, which withholds the score:
+     * a truncated review is partial coverage, not a clean result.
+     *
+     * @param  array<int, array{path: string, content: string, type: string}>  $chunk
+     */
+    private function recordAnalysedChunk(array $chunk, VulnerabilityReport $report): void
+    {
+        if (! $this->lastChunkTruncated) {
+            $this->filesAnalyzed += count($chunk);
+
+            return;
+        }
+
+        $mentioned = [];
+
+        foreach ($report->vulnerabilities as $vulnerability) {
+            $mentioned[$vulnerability->location] = true;
+        }
+
+        foreach ($chunk as $file) {
+            if (isset($mentioned[$file['path']])) {
+                $this->filesAnalyzed++;
+
+                continue;
+            }
+
+            $this->recordSkippedFile($file['path'], ScanCoverage::REASON_AI_FAILURE);
+        }
+
+        $this->lastChunkTruncated = false;
     }
 
     /**
@@ -327,12 +535,12 @@ final class HackScanner implements ScannerInterface
             'reason' => $reason,
         ]);
 
-        return new VulnerabilityReport(
+        return (new VulnerabilityReport(
             vulnerabilities: [],
             overallScore: 100,
             summary: "Refused to scan \"{$path}\": {$reason}.",
             ctfIdea: '',
-        );
+        ))->setTargetError("Refused to scan \"{$path}\": {$reason}.");
     }
 
     /**
@@ -343,7 +551,7 @@ final class HackScanner implements ScannerInterface
         $this->resetCoverage();
 
         $fileData = [
-            'path' => 'inline-code.php',
+            'path' => self::INLINE_CODE_PATH,
             'content' => $code,
             'type' => 'other',
         ];
@@ -352,7 +560,7 @@ final class HackScanner implements ScannerInterface
 
         try {
             $report = $this->analyzeFiles([$fileData]);
-            $this->filesAnalyzed = 1;
+            $this->recordAnalysedChunk([$fileData], $report);
         } catch (\Throwable $e) {
             $this->chunksFailedParse++;
             $this->recordSkippedFile($fileData['path'], ScanCoverage::REASON_AI_FAILURE);
@@ -399,8 +607,9 @@ final class HackScanner implements ScannerInterface
             }
 
             try {
-                $reports[] = $this->analyzeFiles($chunk);
-                $this->filesAnalyzed += count($chunk);
+                $chunkReport = $this->analyzeFiles($chunk);
+                $reports[] = $chunkReport;
+                $this->recordAnalysedChunk($chunk, $chunkReport);
             } catch (\Throwable $e) {
                 $this->chunksFailedParse++;
                 $this->recordSkippedChunk($chunk, ScanCoverage::REASON_AI_FAILURE);
@@ -470,6 +679,18 @@ final class HackScanner implements ScannerInterface
      */
     private function analyzeFiles(array $files): VulnerabilityReport
     {
+        // The single place an AI request is made, so deterministic mode is
+        // enforced here rather than at each entry point: the files still count
+        // as analysed, by the engine that runs after this in every path.
+        if ($this->deterministic) {
+            return new VulnerabilityReport(
+                vulnerabilities: [],
+                overallScore: 100,
+                summary: '',
+                ctfIdea: '',
+            );
+        }
+
         $this->injectRouteContext($files);
         $this->injectRoutedMethods($files);
         $this->injectFormRequestContext($files);
@@ -490,12 +711,12 @@ final class HackScanner implements ScannerInterface
                 $result['usage']['completion_tokens'],
             );
 
-            return $this->responseParser->parse($result['text']);
+            return $this->parseChunkResponse($result['text'], $files);
         }
 
         $response = $this->aiAdapter->send($systemPrompt, $userPrompt);
 
-        return $this->responseParser->parse($response);
+        return $this->parseChunkResponse($response, $files);
     }
 
     /**
@@ -924,25 +1145,15 @@ final class HackScanner implements ScannerInterface
 
     /**
      * Extract the fully-qualified class name from PHP source code.
+     *
+     * Read from tokens, not `/class\s+(\w+)/`: that regex matched a
+     * `// This class exposes…` comment, asked the router about
+     * `App\Http\Controllers\exposes`, got no routes back, and the IDOR in the
+     * real class was silently suppressed.
      */
     private function extractClassName(string $content): ?string
     {
-        $namespace = null;
-        $class = null;
-
-        if (preg_match('/namespace\s+([^;]+);/', $content, $match)) {
-            $namespace = trim($match[1]);
-        }
-
-        if (preg_match('/class\s+(\w+)/', $content, $match)) {
-            $class = $match[1];
-        }
-
-        if ($class === null) {
-            return null;
-        }
-
-        return $namespace !== null ? "{$namespace}\\{$class}" : $class;
+        return CodeExtractor::classDeclaration($content)['fqcn'] ?? null;
     }
 
     /**
@@ -959,7 +1170,7 @@ final class HackScanner implements ScannerInterface
      */
     private function maybeVerify(VulnerabilityReport $report, ?string $inlineCode = null): VulnerabilityReport
     {
-        if (! $this->verify || $this->verificationEngine === null) {
+        if (! $this->verify || $this->deterministic || $this->verificationEngine === null) {
             return $report;
         }
 
@@ -1036,8 +1247,19 @@ final class HackScanner implements ScannerInterface
      * Resolve and cache the source file for a vulnerability location.
      *
      * For inline scans (hack:scanCode), returns the original code regardless
-     * of location. For real files, resolves relative paths against base_path
-     * and caches reads to avoid re-reading a file for multiple findings.
+     * of location — it is exactly what the scan pass already sent.
+     *
+     * For real files the location is AI OUTPUT, not a trusted path. It used to
+     * be read verbatim, so a model answering `location: ".env"` (or any
+     * absolute path) had that file sent to the provider unredacted on the
+     * verification pass. A location is now loaded only when it resolves inside
+     * base_path(), is not a sensitive file (`scan.sensitive_patterns`), and is
+     * a file this scanner's extractor actually read for analysis. The content
+     * then goes through CodeExtractor::extract() — the same comment stripping
+     * and secret redaction the scan pass applied — so verification never sees
+     * more than the scan did, and its line numbers still match the file.
+     *
+     * @param  array<string, string|null>  $cache
      */
     private function loadFileForVerification(string $location, array &$cache, ?string $inlineCode): ?string
     {
@@ -1049,17 +1271,54 @@ final class HackScanner implements ScannerInterface
             return $cache[$location];
         }
 
-        $absolute = str_starts_with($location, DIRECTORY_SEPARATOR)
-            ? $location
-            : base_path($location);
+        $realPath = $this->resolveVerifiablePath($location);
 
-        if (! is_file($absolute) || ! is_readable($absolute)) {
+        if ($realPath === null) {
             return $cache[$location] = null;
         }
 
-        $contents = file_get_contents($absolute);
+        $extracted = $this->codeExtractor->extract(new SplFileInfo($realPath));
 
-        return $cache[$location] = $contents === false ? null : $contents;
+        return $cache[$location] = $extracted['content'] === '' ? null : $extracted['content'];
+    }
+
+    /**
+     * The real path of an AI-reported location when it is safe to re-read for
+     * verification, or null when it is outside the application, sensitive, or
+     * was never part of the analysed file set.
+     */
+    private function resolveVerifiablePath(string $location): ?string
+    {
+        $basePath = realpath(base_path());
+
+        if ($basePath === false || trim($location) === '') {
+            return null;
+        }
+
+        $candidate = str_starts_with($location, DIRECTORY_SEPARATOR)
+            ? $location
+            : base_path($location);
+
+        $realPath = realpath($candidate);
+
+        if ($realPath === false || ! is_file($realPath) || ! is_readable($realPath)) {
+            return null;
+        }
+
+        if (! str_starts_with($realPath, $basePath.DIRECTORY_SEPARATOR)) {
+            return null;
+        }
+
+        if ($this->fileCollector->matchesSensitivePattern($realPath)
+            || $this->fileCollector->matchesSensitivePattern($location)) {
+            return null;
+        }
+
+        if (! $this->codeExtractor->hasExtracted($realPath)) {
+            return null;
+        }
+
+        return $realPath;
     }
 
     /**
@@ -1082,11 +1341,33 @@ final class HackScanner implements ScannerInterface
             $context = $this->buildAccessControlContext($files);
             $deterministic = $analyzer->analyze($files, $context);
         } catch (\Throwable $e) {
-            Log::warning('[HackAuditor] Access-control analysis failed', [
+            Log::error('[HackAuditor] Access-control analysis failed', [
                 'error' => $e->getMessage(),
             ]);
 
-            return $report;
+            // This used to return the report untouched: a crash in the engine
+            // produced a report indistinguishable from a clean one. In
+            // deterministic mode it was the only engine, so nothing was analysed.
+            if ($this->deterministic) {
+                $this->filesAnalyzed = 0;
+
+                foreach ($files as $file) {
+                    $this->recordSkippedFile($file['path'], ScanCoverage::REASON_UNREADABLE);
+                }
+            }
+
+            return (new VulnerabilityReport(
+                vulnerabilities: $report->vulnerabilities,
+                overallScore: $report->overallScore,
+                summary: trim($report->summary."\n\nThe deterministic access-control engine failed "
+                    ."({$e->getMessage()}), so its findings are missing from this report."),
+                ctfIdea: $report->ctfIdea,
+                verificationAttempted: $report->verificationAttempted,
+                verifiedCount: $report->verifiedCount,
+                downgradedCount: $report->downgradedCount,
+                verificationInputTokens: $report->verificationInputTokens,
+                verificationOutputTokens: $report->verificationOutputTokens,
+            ))->inheritScanStateFrom($report);
         }
 
         // Always reconcile the AI findings against the deterministic findings.

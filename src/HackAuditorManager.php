@@ -34,17 +34,39 @@ final class HackAuditorManager
      * a full application scan is performed using configured paths.
      * An optional UsageTracker can be provided to monitor token consumption.
      */
-    public function scan(?string $path = null, ?UsageTracker $tracker = null): VulnerabilityReport
+    public function scan(?string $path = null, ?UsageTracker $tracker = null, bool $deterministic = false): VulnerabilityReport
     {
         if ($tracker !== null) {
             $this->scanner->setUsageTracker($tracker);
         }
+
+        // The scanner is a container singleton, and an MCP server is one long
+        // process: set the mode on every call so one request cannot leave it
+        // switched on (or off) for the next.
+        $this->scanner->setDeterministic($deterministic);
 
         if ($path !== null) {
             return $this->scanner->scanFile($path);
         }
 
         return $this->scanner->scan();
+    }
+
+    /**
+     * Scan only the PHP files changed on the current branch versus a base branch.
+     *
+     * @param  string|null  $baseBranch  Null auto-detects main/master.
+     * @param  string|null  $path  Optional app-relative file or directory to narrow the diff to.
+     */
+    public function scanDiff(?string $baseBranch = null, ?string $path = null, ?UsageTracker $tracker = null, bool $deterministic = false): VulnerabilityReport
+    {
+        if ($tracker !== null) {
+            $this->scanner->setUsageTracker($tracker);
+        }
+
+        $this->scanner->setDeterministic($deterministic);
+
+        return $this->scanner->scanDiff($baseBranch, $path);
     }
 
     /**

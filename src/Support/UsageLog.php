@@ -43,17 +43,50 @@ final class UsageLog
             'model' => $meta['model'] ?? null,
         ];
 
+        // Encode first: json_encode() returning false used to be written as an
+        // empty file, wiping every previously logged scan. Invalid UTF-8 (a
+        // --path with Latin-1 bytes) is substituted; any other failure throws
+        // before the existing log is touched.
+        $json = json_encode(
+            $entries,
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR,
+        );
+
         $directory = dirname($this->path);
 
         if (! File::isDirectory($directory)) {
             File::makeDirectory($directory, 0755, true);
         }
 
-        file_put_contents(
-            $this->path,
-            json_encode($entries, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES),
-            LOCK_EX,
-        );
+        $this->preserveUnreadableLog();
+
+        file_put_contents($this->path, $json, LOCK_EX);
+    }
+
+    /**
+     * Move an existing log that cannot be decoded out of the way.
+     *
+     * all() reads a corrupt log as empty, so appending would otherwise
+     * overwrite months of spend history with a single entry. The unreadable
+     * file is kept next to the log for manual recovery instead.
+     */
+    private function preserveUnreadableLog(): void
+    {
+        if (! file_exists($this->path)) {
+            return;
+        }
+
+        $contents = file_get_contents($this->path);
+
+        if ($contents === false || trim($contents) === '') {
+            return;
+        }
+
+        if (is_array(json_decode($contents, true))) {
+            return;
+        }
+
+        @rename($this->path, $this->path.'.corrupt-'.now()->format('YmdHis'));
     }
 
     /**

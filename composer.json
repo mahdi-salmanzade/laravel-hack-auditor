@@ -1,6 +1,6 @@
 {
     "name": "mahdisphp/laravel-hack-auditor",
-    "description": "AI-powered security auditor & CTF generator for Laravel. Watch AI hack your app in 15 seconds.",
+    "description": "AI-assisted security auditor and CTF generator for Laravel, with a deterministic, zero-cost access-control engine. Every claim backed by evidence.",
     "keywords": ["laravel", "security", "audit", "ctf", "ai", "vulnerability", "scanner", "hacking", "penetration-testing"],
     "license": "MIT",
     "type": "library",
@@ -13,14 +13,14 @@
     "require": {
         "php": "^8.3",
         "laravel/ai": "^0.11|^1.0",
-        "laravel/mcp": "^0.6|^0.7.1|^0.8|^0.9",
+        "laravel/mcp": "^0.6|^0.7.1|^0.8|^0.9|^1.0.1",
         "illuminate/support": "^12.41.1|^13.0",
         "illuminate/console": "^12.41.1|^13.0",
-        "nikic/php-parser": "^5.8"
+        "nikic/php-parser": "^5.9"
     },
     "require-dev": {
-        "larastan/larastan": "^3.10",
-        "laravel/pint": "^1.30.5",
+        "larastan/larastan": "^3.12",
+        "laravel/pint": "^1.32",
         "orchestra/testbench": "^10.11|^11.2",
         "pestphp/pest": "^4.7|^5.1"
     },

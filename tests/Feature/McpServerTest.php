@@ -62,7 +62,9 @@ beforeEach(function (): void {
 
     file_put_contents(
         $this->tempDir.'/app/Http/Controllers/UserController.php',
-        '<?php class UserController { public function show($id) { return DB::select("SELECT * FROM users WHERE id = $id"); } }',
+        // Padded so the canned finding's line 42 exists: the parser clamps a
+        // reported line to the length of the file it names.
+        '<?php class UserController { public function show($id) { return DB::select("SELECT * FROM users WHERE id = $id"); } }'.str_repeat("\n// pad", 60),
     );
 
     $reflector = new ReflectionProperty($this->app, 'basePath');
@@ -97,7 +99,7 @@ it('scan_path returns structured findings from the scanner', function (): void {
         ->assertSee('SQL Injection')
         ->assertSee('app/Http/Controllers/UserController.php')
         ->assertStructuredContent(function (AssertableJson $json): void {
-            $json->where('overall_score', 40)
+            $json->where('overall_score', 60)
                 ->where('counts.critical', 1)
                 ->where('counts.total', 1)
                 ->has('findings', 1)
@@ -153,7 +155,7 @@ it('scan_diff scans changed files and returns findings', function (): void {
     {
         public function __construct(private string $file) {}
 
-        public function getChangedFiles(string $baseBranch = 'main'): array
+        public function getChangedFiles(?string $baseBranch = null, ?string $restrictTo = null): array
         {
             return [$this->file];
         }
@@ -172,7 +174,7 @@ it('scan_diff scans changed files and returns findings', function (): void {
 it('scan_diff reports cleanly when no files changed', function (): void {
     app()->instance(GitDiffCollector::class, new class extends GitDiffCollector
     {
-        public function getChangedFiles(string $baseBranch = 'main'): array
+        public function getChangedFiles(?string $baseBranch = null, ?string $restrictTo = null): array
         {
             return [];
         }

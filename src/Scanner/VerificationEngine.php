@@ -17,9 +17,21 @@ use Throwable;
  * HIGH/CRITICAL finding. Findings with a working exploit are retained with a
  * verified flag; findings the model cannot exploit are downgraded one tier.
  * Technical failures (AI throws, malformed JSON) leave the finding untouched.
+ *
+ * "Untouched" is the contract, not an accident: a failed verification must
+ * never delete a finding or quietly move its severity. The finding comes back
+ * with exploitVerified still null — neither confirmed nor refuted — and each
+ * such failure is counted so the report can say how many HIGH+ findings went
+ * UNVERIFIED rather than implying every one was checked.
  */
 final class VerificationEngine
 {
+    /**
+     * HIGH+ findings whose verification failed for technical reasons since
+     * this engine was created (or last reset).
+     */
+    private int $unverifiedCount = 0;
+
     public function __construct(
         private readonly AIAdapter $ai,
         private readonly PromptBuilder $prompts,
@@ -51,6 +63,8 @@ final class VerificationEngine
                 'error' => $e->getMessage(),
             ]);
 
+            $this->unverifiedCount++;
+
             return $vuln;
         }
 
@@ -68,6 +82,8 @@ final class VerificationEngine
                 'error' => $e->getMessage(),
             ]);
 
+            $this->unverifiedCount++;
+
             return $vuln;
         }
 
@@ -76,6 +92,24 @@ final class VerificationEngine
         }
 
         return $this->markDowngraded($vuln);
+    }
+
+    /**
+     * How many in-scope findings came back UNVERIFIED because the AI call
+     * failed or its response could not be parsed. Such findings are returned
+     * unchanged with exploitVerified === null.
+     */
+    public function unverifiedCount(): int
+    {
+        return $this->unverifiedCount;
+    }
+
+    /**
+     * Reset the unverified counter, e.g. at the start of a new scan.
+     */
+    public function resetUnverifiedCount(): void
+    {
+        $this->unverifiedCount = 0;
     }
 
     /**

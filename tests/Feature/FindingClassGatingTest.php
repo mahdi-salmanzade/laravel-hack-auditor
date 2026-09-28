@@ -146,7 +146,7 @@ afterEach(function (): void {
 it('does not let a critical review item touch the score', function (): void {
     $report = gatingScanner(new CriticalQuestionDetector)->scan();
 
-    expect($report->overallScore)->toBe(90)
+    expect($report->overallScore)->toBe(100)
         ->and($report->scoreIsMeaningful())->toBeTrue()
         ->and($report->totalCount())->toBe(0)
         ->and($report->reviewCount())->toBe(1)
@@ -157,7 +157,7 @@ it('still penalises the score for an asserted critical vulnerability', function 
     // The mirror image: gating must suppress questions, not penalties.
     $report = gatingScanner(new CriticalAssertionDetector)->scan();
 
-    expect($report->overallScore)->toBe(50)
+    expect($report->overallScore)->toBe(60)
         ->and($report->totalCount())->toBe(1)
         ->and($report->reviewCount())->toBe(0)
         ->and($report->hasCritical())->toBeTrue();
@@ -229,5 +229,5 @@ it('keeps the classes apart in --json output', function (): void {
         ->and($json['counts']['total'])->toBe(0)
         ->and($json['counts']['critical'])->toBe(0)
         ->and($json['counts']['review'])->toBe(1)
-        ->and($json['overall_score'])->toBe(90);
+        ->and($json['overall_score'])->toBe(100);
 });

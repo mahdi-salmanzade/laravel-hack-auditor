@@ -1483,25 +1483,13 @@ class ContextCollector
 
     /**
      * Extract the fully-qualified class name from PHP source content.
+     *
+     * Token based (CodeExtractor::classDeclaration): the old `/class\s+(\w+)/`
+     * read "exposes" out of a `// This class exposes…` comment.
      */
     private function extractFqcn(string $content): ?string
     {
-        $namespace = null;
-        $class = null;
-
-        if (preg_match('/namespace\s+([^;]+);/', $content, $match)) {
-            $namespace = trim($match[1]);
-        }
-
-        if (preg_match('/class\s+(\w+)/', $content, $match)) {
-            $class = $match[1];
-        }
-
-        if ($class === null) {
-            return null;
-        }
-
-        return $namespace !== null ? "{$namespace}\\{$class}" : $class;
+        return CodeExtractor::classDeclaration($content)['fqcn'] ?? null;
     }
 
     /**
@@ -1509,11 +1497,7 @@ class ContextCollector
      */
     private function extractClassNameFromContent(string $content): ?string
     {
-        if (preg_match('/class\s+(\w+)/', $content, $match)) {
-            return $match[1];
-        }
-
-        return null;
+        return CodeExtractor::classDeclaration($content)['class'] ?? null;
     }
 
     /**

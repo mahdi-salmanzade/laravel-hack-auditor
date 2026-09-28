@@ -33,6 +33,8 @@ class ScanPathTool extends Tool
         return [
             'path' => $schema->string()
                 ->description('A file or directory path relative to the Laravel application root (e.g. "app/Http/Controllers/UserController.php" or "app/Models"). Absolute paths inside the project are also accepted. Omit to scan the application\'s configured scan paths.'),
+            'deterministic' => $schema->boolean()
+                ->description('Run only the reproducible AST-based access-control engine (IDOR, missing authorization, policy/route mismatch, mass assignment, SSRF, sensitive data exposure). No AI request, no API key, no cost — but injection and XSS are not looked for. Default false.'),
         ];
     }
 
@@ -48,7 +50,7 @@ class ScanPathTool extends Tool
             return $error;
         }
 
-        $report = $this->auditor->scan($path);
+        $report = $this->auditor->scan($path, deterministic: $request->get('deterministic') === true);
 
         return FindingFormatter::report($report, $path ?? '(application scan paths)');
     }

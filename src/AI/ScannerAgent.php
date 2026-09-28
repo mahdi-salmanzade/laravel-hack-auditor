@@ -7,8 +7,10 @@ namespace Mahdi\HackAuditor\AI;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\Conversational;
 use Laravel\Ai\Contracts\HasTools;
+use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Gateway\TextGenerationOptions;
 use Laravel\Ai\Promptable;
+use Laravel\Ai\Providers\Tools\ProviderTool;
 
 /**
  * Agent used for security scans.
@@ -34,13 +36,14 @@ class ScannerAgent implements Agent, Conversational, HasTools
      * @param  float|null  $temperature  Null omits the parameter from the request —
      *                                   required for models that reject sampling
      *                                   parameters (Claude Opus 4.7+, Sonnet 5, Fable 5).
+     * @param  list<Agent|Tool|ProviderTool>  $tools
      */
     public function __construct(
         public string $instructions,
         public ?float $temperature = null,
         public ?int $maxTokens = null,
         public iterable $messages = [],
-        public iterable $tools = [],
+        public array $tools = [],
     ) {}
 
     /**

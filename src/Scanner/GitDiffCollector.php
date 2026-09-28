@@ -9,29 +9,67 @@ use RuntimeException;
 class GitDiffCollector
 {
     /**
+     * The ref the most recent diff was actually computed against.
+     */
+    private ?string $resolvedBase = null;
+
+    /**
      * Get PHP files that changed compared to the base branch.
      *
-     * Runs a git diff against the given base branch (or auto-detected default)
-     * and returns only PHP files within configured scan paths that are not
-     * matched by sensitive patterns. Useful in CI to scan only what a PR touches.
+     * Runs a git diff against the given base branch and returns only PHP files
+     * within configured scan paths that are not matched by sensitive patterns.
+     * Useful in CI to scan only what a PR touches.
      *
+     * Three failure modes used to be reported as "no changed files" — a green
+     * CI check on a PR nobody looked at — and now throw instead:
+     *
+     *  - the base ref does not exist locally or on origin (typically a shallow
+     *    `actions/checkout` without `fetch-depth: 0`);
+     *  - an explicitly requested base could not be resolved, in which case the
+     *    collector used to diff against `main`/`master` instead — a different
+     *    comparison from the one asked for, reported as if it were the same;
+     *  - the Laravel app lives in a subdirectory of the repository, where git
+     *    reports repo-root paths (`backend/app/...`) that never matched the
+     *    configured scan paths. The diff now runs from base_path() with
+     *    `--relative`, so paths are app-relative wherever the app lives.
+     *
+     * @param  string|null  $baseBranch  The base to diff against. Null auto-detects
+     *                                   `main`, then `master`; an explicit branch is
+     *                                   used exactly, with no fallback.
+     * @param  string|null  $restrictTo  Optional app-relative file or directory the
+     *                                   result is narrowed to (`--path` with `--diff`).
      * @return array<int, string> Absolute file paths
      *
-     * @throws RuntimeException If not inside a git repository.
+     * @throws RuntimeException If not inside a git repository, or the base cannot be resolved.
      */
-    public function getChangedFiles(string $baseBranch = 'main'): array
+    public function getChangedFiles(?string $baseBranch = null, ?string $restrictTo = null): array
     {
         $this->ensureGitRepository();
 
-        $files = $this->diffAgainstBranch($baseBranch);
+        $candidates = $baseBranch !== null && trim($baseBranch) !== ''
+            ? [trim($baseBranch)]
+            : ['main', 'master'];
 
-        if ($files === null) {
-            $fallback = $baseBranch === 'main' ? 'master' : 'main';
-            $files = $this->diffAgainstBranch($fallback);
+        $files = null;
+
+        foreach ($candidates as $candidate) {
+            $files = $this->diffAgainstBranch($candidate);
+
+            if ($files !== null) {
+                break;
+            }
         }
 
         if ($files === null) {
-            return [];
+            $tried = implode(', ', array_map(
+                static fn (string $candidate): string => "{$candidate}, origin/{$candidate}",
+                $candidates,
+            ));
+
+            throw new RuntimeException(
+                "Could not resolve the diff base (tried {$tried}). In CI this usually means a shallow "
+                .'checkout: set `fetch-depth: 0` on actions/checkout, or fetch the base branch before scanning.'
+            );
         }
 
         $basePath = base_path();
@@ -53,10 +91,12 @@ class GitDiffCollector
             'storage/logs/*',
         ]);
 
+        $restriction = $this->normaliseRestriction($restrictTo);
+
         $absolutePaths = [];
 
         foreach ($files as $relativePath) {
-            $relativePath = trim($relativePath);
+            $relativePath = str_replace('\\', '/', trim($relativePath));
 
             if ($relativePath === '') {
                 continue;
@@ -66,13 +106,17 @@ class GitDiffCollector
                 continue;
             }
 
+            if ($restriction !== null && ! $this->isWithinScanPaths($relativePath, [$restriction])) {
+                continue;
+            }
+
             if ($this->matchesSensitivePattern($relativePath, $sensitivePatterns)) {
                 continue;
             }
 
             $absolutePath = $basePath.DIRECTORY_SEPARATOR.$relativePath;
 
-            if (file_exists($absolutePath)) {
+            if (is_file($absolutePath)) {
                 $absolutePaths[] = $absolutePath;
             }
         }
@@ -83,35 +127,21 @@ class GitDiffCollector
     }
 
     /**
-     * Detect the default base branch for the repository.
-     *
-     * Tries `main` first, then `master`, falling back to `main` if neither exists.
+     * The ref the most recent getChangedFiles() call diffed against, e.g. `origin/main`.
      */
-    private function detectBaseBranch(): string
+    public function resolvedBase(): ?string
     {
-        exec('git rev-parse --verify main 2>/dev/null', $output, $exitCode);
-
-        if ($exitCode === 0) {
-            return 'main';
-        }
-
-        exec('git rev-parse --verify master 2>/dev/null', $output, $exitCode);
-
-        if ($exitCode === 0) {
-            return 'master';
-        }
-
-        return 'main';
+        return $this->resolvedBase;
     }
 
     /**
-     * Ensure we are inside a git repository.
+     * Ensure base_path() is inside a git work tree.
      *
      * @throws RuntimeException If not inside a git work tree.
      */
     private function ensureGitRepository(): void
     {
-        exec('git rev-parse --is-inside-work-tree 2>/dev/null', $output, $exitCode);
+        exec($this->git('rev-parse --is-inside-work-tree').' 2>/dev/null', $output, $exitCode);
 
         if ($exitCode !== 0) {
             throw new RuntimeException('Not a git repository');
@@ -119,7 +149,7 @@ class GitDiffCollector
     }
 
     /**
-     * Run git diff against the given branch and return file paths, or null on failure.
+     * Run git diff against the given branch and return app-relative paths, or null on failure.
      *
      * @return array<int, string>|null
      */
@@ -130,21 +160,72 @@ class GitDiffCollector
         $refs = [$branch, "origin/{$branch}"];
 
         foreach ($refs as $ref) {
-            $command = sprintf(
-                "git diff --name-only --diff-filter=ACMR %s...HEAD -- '*.php'",
-                escapeshellarg($ref),
+            $output = [];
+
+            exec(
+                $this->git(sprintf('rev-parse --verify --quiet %s', escapeshellarg($ref.'^{commit}'))).' 2>/dev/null',
+                $output,
+                $exitCode,
             );
 
-            exec($command.' 2>/dev/null', $output, $exitCode);
-
-            if ($exitCode === 0) {
-                return $output;
+            if ($exitCode !== 0) {
+                continue;
             }
 
             $output = [];
+
+            // core.quotepath=off keeps non-ASCII paths literal; with it on, git
+            // prints them octal-escaped in quotes and is_file() never matches.
+            exec(
+                $this->git(sprintf(
+                    "-c core.quotepath=off diff --relative --name-only --diff-filter=ACMR %s -- '*.php'",
+                    escapeshellarg($ref.'...HEAD'),
+                )).' 2>/dev/null',
+                $output,
+                $exitCode,
+            );
+
+            if ($exitCode === 0) {
+                $this->resolvedBase = $ref;
+
+                return $output;
+            }
         }
 
         return null;
+    }
+
+    /**
+     * Build a git command that runs from the application root.
+     */
+    private function git(string $arguments): string
+    {
+        return 'git -C '.escapeshellarg(base_path()).' '.$arguments;
+    }
+
+    /**
+     * Normalise a `--path` restriction to an app-relative path without slashes at the ends.
+     */
+    private function normaliseRestriction(?string $restrictTo): ?string
+    {
+        if ($restrictTo === null || trim($restrictTo) === '') {
+            return null;
+        }
+
+        $path = str_replace('\\', '/', trim($restrictTo));
+        $base = str_replace('\\', '/', base_path()).'/';
+
+        if (str_starts_with($path, $base)) {
+            $path = substr($path, strlen($base));
+        }
+
+        if (str_starts_with($path, './')) {
+            $path = substr($path, 2);
+        }
+
+        $path = trim($path, '/');
+
+        return $path === '' ? null : $path;
     }
 
     /**

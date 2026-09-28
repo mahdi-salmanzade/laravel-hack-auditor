@@ -30,6 +30,12 @@ jobs:
           - php: '8.4'
             laravel: '13'
             constraint: ''
+          # laravel/ai 1.x conflicts with laravel/mcp <1.0, so an unpinned install
+          # always resolves the 1.x pair. The 0.x pair is still declared (and
+          # its usage object has different field names), so it gets its own leg.
+          - php: '8.4'
+            laravel: '13 · ai 0.x'
+            constraint: 'laravel/ai:~0.11.0 laravel/mcp:^0.9'
           - php: '8.5'
             laravel: '13'
             constraint: ''
@@ -54,7 +60,12 @@ jobs:
       - name: Install dependencies
         run: |
           if [ -n "${{ matrix.constraint }}" ]; then
-            composer update --with "${{ matrix.constraint }}" --prefer-dist --no-interaction --no-progress
+            # One --with per constraint; a leg may pin several packages.
+            WITH_ARGS=()
+            for constraint in ${{ matrix.constraint }}; do
+              WITH_ARGS+=(--with "$constraint")
+            done
+            composer update "${WITH_ARGS[@]}" --prefer-dist --no-interaction --no-progress
           else
             composer update --prefer-dist --no-interaction --no-progress
           fi

@@ -15,7 +15,7 @@ final class HackHelpCommand extends Command
      *
      * @var string
      */
-    protected $signature = 'hack:help {topic? : Show detailed help for a specific command (demo, scan, ctf, report)}';
+    protected $signature = 'hack:help {topic? : Show detailed help for a specific command (demo, scan, ctf, report, usage, benchmark)}';
 
     /**
      * The console command description.
@@ -42,6 +42,8 @@ final class HackHelpCommand extends Command
             'scan' => $this->showScanHelp(),
             'ctf' => $this->showCtfHelp(),
             'report' => $this->showReportHelp(),
+            'usage' => $this->showUsageHelp(),
+            'benchmark' => $this->showBenchmarkHelp(),
             default => $this->showUnknownCommand($command),
         };
     }
@@ -60,16 +62,18 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=cyan>php artisan hack:demo</>           Zero-config demo');
         $this->line('  <fg=cyan>php artisan hack:scan</>           Full AI security scan');
         $this->line('  <fg=cyan>php artisan hack:ctf</>            Generate CTF challenges');
-        $this->line('  <fg=cyan>php artisan hack:report</>         HTML report from saved scan');
-        $this->line('  <fg=cyan>php artisan hack:usage</>         Token usage & cost stats');
+        $this->line('  <fg=cyan>php artisan hack:report</>         HTML/SARIF/Markdown from saved scan');
+        $this->line('  <fg=cyan>php artisan hack:usage</>          Token usage & cost stats');
+        $this->line('  <fg=cyan>php artisan hack:benchmark</>      Measure recall on the labeled corpus');
         $this->line('');
 
         $this->showCommandSection(
             'hack:demo',
-            'Run a dramatic demo on a purposely vulnerable controller — no API key needed.',
+            'Preview scan output on a purposely vulnerable controller — pre-recorded findings, no AI call, no API key.',
             [
                 'php artisan hack:demo' => 'Run with animations',
                 'php artisan hack:demo --quick' => 'Skip animations',
+                'php artisan hack:demo --copy' => 'Also copy the share text to the clipboard',
             ],
         );
 
@@ -80,7 +84,9 @@ final class HackHelpCommand extends Command
                 'php artisan hack:scan' => 'Scan all configured paths',
                 'php artisan hack:scan --path=app/Http' => 'Scan specific directory',
                 'php artisan hack:scan --json' => 'Machine-readable output',
+                'php artisan hack:scan --format=sarif > results.sarif' => 'SARIF 2.1.0 for GitHub code scanning',
                 'php artisan hack:scan --diff' => 'Only scan changed files',
+                'php artisan hack:scan --fail-on=high' => 'Fail the build on High or Critical',
             ],
             'Requires an AI provider API key in .env',
         );
@@ -92,18 +98,19 @@ final class HackHelpCommand extends Command
                 'php artisan hack:ctf' => 'Interactive menu',
                 'php artisan hack:ctf sql_injection' => 'Specific vulnerability type',
                 'php artisan hack:ctf --from-scan' => 'From latest saved scan',
-                'php artisan hack:ctf --from-scan --all' => 'All findings at once',
+                'php artisan hack:ctf --all' => 'Every finding in the latest saved scan (implies --from-scan)',
             ],
             'Requires an AI provider API key in .env',
         );
 
         $this->showCommandSection(
             'hack:report',
-            'Generate an HTML report from saved scan results.',
+            'Generate an HTML, SARIF or Markdown report from saved scan results.',
             [
                 'php artisan hack:report --latest' => 'Most recent saved scan',
                 'php artisan hack:report --id=ULID' => 'Specific scan by ID',
                 'php artisan hack:report --output=report.html' => 'Custom output path',
+                'php artisan hack:report --format=markdown --output=report.md' => 'Markdown for PR comments',
             ],
             'Requires --save flag on a prior hack:scan run',
         );
@@ -141,12 +148,30 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=cyan>$score   = $manager->score(); // null when coverage was incomplete</>');
         $this->line('');
 
+        $this->showCommandSection(
+            'hack:usage',
+            'Show token usage and estimated cost recorded by past scans.',
+            [
+                'php artisan hack:usage' => 'Last 30 days',
+                'php artisan hack:usage --days=7 --json' => 'Last week as JSON',
+            ],
+        );
+
+        $this->showCommandSection(
+            'hack:benchmark',
+            'Measure precision/recall/F1 on the packaged labeled corpus (a recall check, not a real-code precision claim).',
+            [
+                'php artisan hack:benchmark --deterministic' => 'Reproducible engine only — no AI key',
+                'php artisan hack:benchmark --min-f1=0.9' => 'Full pipeline, fail below F1 0.9',
+            ],
+        );
+
         $this->showCurrentSetup();
 
         $this->line('');
         $this->line('  <fg=gray>'.str_repeat('━', 50).'</>');
         $this->line('  Run <fg=cyan>php artisan hack:help <command></> for detailed help.');
-        $this->line('  Available: <fg=cyan>demo</>, <fg=cyan>scan</>, <fg=cyan>ctf</>, <fg=cyan>report</>, <fg=cyan>usage</>');
+        $this->line('  Available: <fg=cyan>demo</>, <fg=cyan>scan</>, <fg=cyan>ctf</>, <fg=cyan>report</>, <fg=cyan>usage</>, <fg=cyan>benchmark</>');
         $this->line('');
     }
 
@@ -164,9 +189,9 @@ final class HackHelpCommand extends Command
         $this->line('');
         $this->line('  <fg=white;options=bold>DESCRIPTION</>');
         $this->line('  <fg=gray>Creates a temporary InsecureController.php with 12</>');
-        $this->line('  <fg=gray>intentional vulnerabilities, runs a hardcoded scan</>');
-        $this->line('  <fg=gray>(no AI API call), displays dramatic results, then</>');
-        $this->line('  <fg=gray>deletes the temp file. No API key required.</>');
+        $this->line('  <fg=gray>planted flaws and shows PRE-RECORDED findings for it</>');
+        $this->line('  <fg=gray>(no AI API call is made), scored with the real formula,</>');
+        $this->line('  <fg=gray>then deletes the temp file. No API key required.</>');
         $this->line('');
 
         $this->line('  <fg=white;options=bold>FLAGS</>');
@@ -188,7 +213,7 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
         $this->line('');
         $this->line('  <fg=cyan>$ php artisan hack:demo</>');
-        $this->line('  <fg=gray>  Full animated demo with dramatic output</>');
+        $this->line('  <fg=gray>  Full animated demo</>');
         $this->line('');
         $this->line('  <fg=cyan>$ php artisan hack:demo --quick</>');
         $this->line('  <fg=gray>  Skip animations for CI or screenshots</>');
@@ -198,8 +223,8 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
         $this->line('  <fg=gray>1. Creates temp file in storage/hack-auditor/demo/</>');
         $this->line('  <fg=gray>2. Displays animated scanning steps</>');
-        $this->line('  <fg=gray>3. Shows hardcoded results: score 8/100, 12 vulns</>');
-        $this->line('  <fg=gray>4. Copies share text to clipboard</>');
+        $this->line('  <fg=gray>3. Shows pre-recorded results: 11 confirmed, 1 for review</>');
+        $this->line('  <fg=gray>4. Prints share text (copied to clipboard only with --copy)</>');
         $this->line('  <fg=gray>5. Deletes temp file on exit</>');
         $this->line('');
 
@@ -263,7 +288,13 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
         $this->line('');
         $this->line('  <fg=cyan>$ php artisan hack:scan --json</>');
-        $this->line('  <fg=gray>  Machine-readable JSON output</>');
+        $this->line('  <fg=gray>  Machine-readable JSON output (same as --format=json)</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:scan --format=sarif > hack-auditor.sarif</>');
+        $this->line('  <fg=gray>  SARIF 2.1.0 for GitHub code scanning (stable partialFingerprints)</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:scan --format=markdown >> $GITHUB_STEP_SUMMARY</>');
+        $this->line('  <fg=gray>  Markdown summary for PR comments and job summaries</>');
         $this->line('');
         $this->line('  <fg=cyan>$ php artisan hack:scan --html</>');
         $this->line('  <fg=gray>  Generate HTML report alongside console output</>');
@@ -279,7 +310,9 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=gray>  Only show High and Critical findings</>');
         $this->line('');
         $this->line('  <fg=cyan>$ php artisan hack:scan --fix</>');
-        $this->line('  <fg=gray>  Include AI-generated fix suggestions</>');
+        $this->line('  <fg=gray>  Show suggested fixes (confirmed findings that carry one)</>');
+        $this->line('');
+        $this->line('  <fg=gray>  --severity defaults to config severity.minimum_report.</>');
         $this->line('');
 
         $this->line('  <fg=white;options=bold>BUDGET CONTROL</>');
@@ -331,8 +364,17 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=cyan>$ php artisan hack:scan --diff --base=develop</>');
         $this->line('  <fg=gray>  Diff against a custom base branch</>');
         $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:scan --diff --path=app/Http</>');
+        $this->line('  <fg=gray>  Changed files under app/Http only</>');
+        $this->line('');
         $this->line('  <fg=cyan>$ php artisan hack:scan --update-baseline</>');
-        $this->line('  <fg=gray>  Save current findings as baseline</>');
+        $this->line('  <fg=gray>  Save current findings as baseline (matched by fingerprint:</>');
+        $this->line('  <fg=gray>  type + file + flagged source line, so rewording and</>');
+        $this->line('  <fg=gray>  edits elsewhere in the file do not re-open them)</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:scan --baseline</>');
+        $this->line('  <fg=gray>  Require the baseline — exit 2 if the file is missing</>');
+        $this->line('  <fg=gray>  (it is applied automatically whenever it exists)</>');
         $this->line('');
 
         $this->line('  <fg=white;options=bold>POWER COMBOS</>');
@@ -351,8 +393,13 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=white;options=bold>EXIT CODES</>');
         $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
         $this->line('');
-        $this->line('  <fg=green>0</>  No critical vulnerabilities found');
-        $this->line('  <fg=red>1</>  One or more critical vulnerabilities detected');
+        $this->line('  <fg=green>0</>  No confirmed finding at or above --fail-on (default: critical)');
+        $this->line('  <fg=red>1</>  A confirmed finding at or above --fail-on remains after');
+        $this->line('     --severity and the baseline were applied');
+        $this->line('  <fg=red>2</>  Invalid usage, or the scan target was missing/refused');
+        $this->line('     (nothing was scanned)');
+        $this->line('');
+        $this->line('  <fg=gray>Review items never affect the exit code. --fail-on=none never fails.</>');
         $this->line('');
 
         $this->line('  <fg=white;options=bold>RELATED CONFIG</>');
@@ -364,6 +411,7 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=cyan>scan.chunk_size</>         Files per AI request');
         $this->line('  <fg=cyan>scan.confirm_above_files</>  Prompt threshold');
         $this->line('  <fg=cyan>scan.baseline_path</>      Baseline JSON location');
+        $this->line('  <fg=cyan>severity.minimum_report</> Default for --severity');
         $this->line('  <fg=cyan>context.enabled</>         Context-aware scanning');
         $this->line('  <fg=cyan>usage.default_limit</>     Default token budget');
         $this->line('');
@@ -427,8 +475,8 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=cyan>$ php artisan hack:ctf --from-scan</>');
         $this->line('  <fg=gray>  Pick from latest scan findings</>');
         $this->line('');
-        $this->line('  <fg=cyan>$ php artisan hack:ctf --from-scan --all</>');
-        $this->line('  <fg=gray>  Generate CTF for every finding in latest scan</>');
+        $this->line('  <fg=cyan>$ php artisan hack:ctf --all</>');
+        $this->line('  <fg=gray>  Generate CTF for every finding in latest scan (implies --from-scan)</>');
         $this->line('');
 
         $this->line('  <fg=white;options=bold>OUTPUT DIRECTORY</>');
@@ -451,16 +499,16 @@ final class HackHelpCommand extends Command
     private function showReportHelp(): int
     {
         $this->line('');
-        $this->line('  <fg=white;options=bold>hack:report</> — HTML report generator');
+        $this->line('  <fg=white;options=bold>hack:report</> — HTML / SARIF / Markdown report generator');
         $this->line('  <fg=gray>'.str_repeat('━', 50).'</>');
         $this->line('');
         $this->line('  <fg=white;options=bold>SYNOPSIS</>');
         $this->line('  <fg=cyan>php artisan hack:report [options]</>');
         $this->line('');
         $this->line('  <fg=white;options=bold>DESCRIPTION</>');
-        $this->line('  <fg=gray>Generates a self-contained HTML security report from</>');
-        $this->line('  <fg=gray>previously saved scan results. Requires at least one</>');
-        $this->line('  <fg=gray>prior scan with --save flag.</>');
+        $this->line('  <fg=gray>Generates a self-contained HTML (default), SARIF 2.1.0 or</>');
+        $this->line('  <fg=gray>Markdown report from previously saved scan results. Requires</>');
+        $this->line('  <fg=gray>at least one prior scan with --save flag.</>');
         $this->line('');
 
         $this->line('  <fg=white;options=bold>FLAGS</>');
@@ -488,6 +536,9 @@ final class HackHelpCommand extends Command
         $this->line('  <fg=cyan>$ php artisan hack:report --output=public/security-report.html</>');
         $this->line('  <fg=gray>  Save report to a custom path</>');
         $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:report --format=sarif --output=hack-auditor.sarif</>');
+        $this->line('  <fg=gray>  SARIF for upload to GitHub code scanning</>');
+        $this->line('');
 
         /** @var string $reportPath */
         $reportPath = config('hack-auditor.report.output_path', 'hack-auditor/reports');
@@ -509,13 +560,103 @@ final class HackHelpCommand extends Command
     }
 
     /**
+     * Display detailed help for the hack:usage command.
+     */
+    private function showUsageHelp(): int
+    {
+        $this->line('');
+        $this->line('  <fg=white;options=bold>hack:usage</> — Token usage & cost history');
+        $this->line('  <fg=gray>'.str_repeat('━', 50).'</>');
+        $this->line('');
+        $this->line('  <fg=white;options=bold>SYNOPSIS</>');
+        $this->line('  <fg=cyan>php artisan hack:usage [options]</>');
+        $this->line('');
+        $this->line('  <fg=white;options=bold>DESCRIPTION</>');
+        $this->line('  <fg=gray>Summarises the tokens, requests and estimated cost that</>');
+        $this->line('  <fg=gray>hack:scan recorded in storage/hack-auditor/usage.json.</>');
+        $this->line('  <fg=gray>Disable recording with usage.log_enabled = false.</>');
+        $this->line('');
+
+        $this->showFlagsTable('hack:usage');
+
+        $this->line('');
+        $this->line('  <fg=white;options=bold>EXAMPLES</>');
+        $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:usage</>');
+        $this->line('  <fg=gray>  Usage over the last 30 days</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:usage --days=7 --json</>');
+        $this->line('  <fg=gray>  Last week as JSON</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:usage --clear</>');
+        $this->line('  <fg=gray>  Delete the usage log</>');
+        $this->line('');
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Display detailed help for the hack:benchmark command.
+     */
+    private function showBenchmarkHelp(): int
+    {
+        $this->line('');
+        $this->line('  <fg=white;options=bold>hack:benchmark</> — Accuracy on the labeled corpus');
+        $this->line('  <fg=gray>'.str_repeat('━', 50).'</>');
+        $this->line('');
+        $this->line('  <fg=white;options=bold>SYNOPSIS</>');
+        $this->line('  <fg=cyan>php artisan hack:benchmark [options]</>');
+        $this->line('');
+        $this->line('  <fg=white;options=bold>DESCRIPTION</>');
+        $this->line('  <fg=gray>Runs the scanner over tests/Fixtures/benchmark and reports</>');
+        $this->line('  <fg=gray>precision, recall and F1 against the ground-truth labels.</>');
+        $this->line('  <fg=gray>The corpus is synthetic: this is a RECALL check and a</>');
+        $this->line('  <fg=gray>regression gate, not a precision claim about real code.</>');
+        $this->line('');
+
+        $this->showFlagsTable('hack:benchmark');
+
+        $this->line('');
+        $this->line('  <fg=white;options=bold>EXAMPLES</>');
+        $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:benchmark --deterministic</>');
+        $this->line('  <fg=gray>  Reproducible engine only — no AI key, no network</>');
+        $this->line('');
+        $this->line('  <fg=cyan>$ php artisan hack:benchmark --min-f1=0.9</>');
+        $this->line('  <fg=gray>  Full pipeline; exits non-zero below F1 0.9</>');
+        $this->line('');
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Print the FLAGS heading and a table of a command's options.
+     */
+    private function showFlagsTable(string $commandName): void
+    {
+        $this->line('  <fg=white;options=bold>FLAGS</>');
+        $this->line('  <fg=gray>'.str_repeat('─', 50).'</>');
+
+        $flags = $this->getCommandFlags($commandName);
+
+        if ($flags !== []) {
+            $this->table(
+                ['<options=bold>Flag</>', '<options=bold>Description</>'],
+                array_map(fn (array $f): array => [$f['name'], $f['description']], $flags),
+            );
+        }
+    }
+
+    /**
      * Show an error for an unrecognized command argument.
      */
     private function showUnknownCommand(string $command): int
     {
         $this->components->error("Unknown command: {$command}");
         $this->line('');
-        $this->line('  Available commands: <fg=cyan>demo</>, <fg=cyan>scan</>, <fg=cyan>ctf</>, <fg=cyan>report</>, <fg=cyan>usage</>');
+        $this->line('  Available commands: <fg=cyan>demo</>, <fg=cyan>scan</>, <fg=cyan>ctf</>, <fg=cyan>report</>, <fg=cyan>usage</>, <fg=cyan>benchmark</>');
         $this->line('');
         $this->line('  <fg=gray>Usage:</> <fg=cyan>php artisan hack:help scan</>');
         $this->line('');

@@ -6,14 +6,10 @@ namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
-use Mahdi\HackAuditor\Scanner\ScanCoverage;
-use Mahdi\HackAuditor\Scanner\Vulnerability;
+use Mahdi\HackAuditor\Report\MarkdownReportGenerator;
+use Mahdi\HackAuditor\Report\SarifReportGenerator;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
-use Mahdi\HackAuditor\Support\Confidence;
-use Mahdi\HackAuditor\Support\FindingClass;
 use Mahdi\HackAuditor\Support\ScanHistory;
-use Mahdi\HackAuditor\Support\SeverityLevel;
-use Mahdi\HackAuditor\Support\VulnerabilityType;
 
 final class HackReportCommand extends Command
 {
@@ -23,8 +19,9 @@ final class HackReportCommand extends Command
      * @var string
      */
     protected $signature = 'hack:report
-        {--latest : Generate report from the most recent saved scan}
+        {--latest : Generate report from the most recent saved scan (the default)}
         {--id= : Generate report from a specific scan ID (ULID)}
+        {--format=html : Report format: html, sarif or markdown}
         {--output= : Custom output file path}';
 
     /**
@@ -32,35 +29,51 @@ final class HackReportCommand extends Command
      *
      * @var string
      */
-    protected $description = 'Generate an HTML security report from saved scan results';
+    protected $description = 'Generate an HTML, SARIF or Markdown security report from saved scan results';
+
+    /**
+     * File extension per supported format.
+     *
+     * @var array<string, string>
+     */
+    private const array FORMATS = [
+        'html' => 'html',
+        'sarif' => 'sarif',
+        'markdown' => 'md',
+    ];
 
     /**
      * Execute the console command.
      */
     public function handle(): int
     {
+        $format = strtolower(trim((string) $this->option('format')));
+
+        if (! array_key_exists($format, self::FORMATS)) {
+            $this->components->error("Unknown --format '{$format}'. Use one of: ".implode(', ', array_keys(self::FORMATS)).'.');
+
+            return self::INVALID;
+        }
+
         $scanData = $this->resolveScanData();
 
         if ($scanData === null) {
             return self::FAILURE;
         }
 
-        $report = $this->buildReportFromArray($scanData);
+        // fromArray() round-trips every field the scan saved — finding class,
+        // confidence, verification, taint trace, coverage, usage — so the
+        // regenerated report shows the same evidence and the same score
+        // suppression as the scan did.
+        $report = VulnerabilityReport::fromArray($scanData);
 
-        /** @var HtmlReportGenerator $generator */
-        $generator = app(HtmlReportGenerator::class);
+        $contents = match ($format) {
+            'sarif' => (new SarifReportGenerator)->generate($report),
+            'markdown' => (new MarkdownReportGenerator)->generate($report),
+            default => $this->renderHtml($report, $scanData),
+        };
 
-        $html = $generator->generate($report, [
-            'scanned_at' => $scanData['created_at'] ?? 'Unknown',
-            'duration' => isset($scanData['scan_duration_ms'])
-                ? round((int) $scanData['scan_duration_ms'] / 1000, 1).'s'
-                : 'N/A',
-            'provider' => $scanData['ai_provider'] ?? 'Unknown',
-            'model' => $scanData['ai_model'] ?? 'Unknown',
-            'total_files' => $scanData['files_scanned'] ?? 0,
-        ]);
-
-        $outputPath = $this->resolveOutputPath();
+        $outputPath = $this->resolveOutputPath(self::FORMATS[$format]);
 
         $dir = dirname($outputPath);
 
@@ -68,11 +81,53 @@ final class HackReportCommand extends Command
             mkdir($dir, 0755, true);
         }
 
-        file_put_contents($outputPath, $html);
+        file_put_contents($outputPath, $contents);
 
-        $this->components->info("HTML report saved to <fg=cyan>{$outputPath}</>");
+        $label = match ($format) {
+            'sarif' => 'SARIF',
+            'markdown' => 'Markdown',
+            default => 'HTML',
+        };
+
+        $this->components->info("{$label} report saved to <fg=cyan>{$outputPath}</>");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Render the HTML report for a rebuilt scan.
+     *
+     * "Files Analyzed" is left to the generator, which reads it from the
+     * restored coverage; the meta key this command used to pass
+     * ('files_scanned') was never written by hack:scan, so it always showed 0.
+     *
+     * @param  array<string, mixed>  $scanData
+     */
+    private function renderHtml(VulnerabilityReport $report, array $scanData): string
+    {
+        /** @var HtmlReportGenerator $generator */
+        $generator = app(HtmlReportGenerator::class);
+
+        return $generator->generate($report, [
+            'scanned_at' => $this->stringMeta($scanData, 'created_at', 'Unknown'),
+            'duration' => is_numeric($scanData['scan_duration_ms'] ?? null)
+                ? round((int) $scanData['scan_duration_ms'] / 1000, 1).'s'
+                : 'N/A',
+            'provider' => $this->stringMeta($scanData, 'ai_provider', 'Unknown'),
+            'model' => $this->stringMeta($scanData, 'ai_model', 'Unknown'),
+        ]);
+    }
+
+    /**
+     * Read a string meta field from saved scan data.
+     *
+     * @param  array<string, mixed>  $scanData
+     */
+    private function stringMeta(array $scanData, string $key, string $default): string
+    {
+        $value = $scanData[$key] ?? null;
+
+        return is_scalar($value) && (string) $value !== '' ? (string) $value : $default;
     }
 
     /**
@@ -110,112 +165,9 @@ final class HackReportCommand extends Command
     }
 
     /**
-     * Build a VulnerabilityReport from saved scan data.
-     *
-     * @param  array<string, mixed>  $scanData
-     */
-    private function buildReportFromArray(array $scanData): VulnerabilityReport
-    {
-        /** @var array<int, array<string, mixed>> $vulnData */
-        $vulnData = is_array($scanData['vulnerabilities'] ?? null) ? $scanData['vulnerabilities'] : [];
-
-        /** @var array<int, array<string, mixed>> $reviewData */
-        $reviewData = is_array($scanData['review_items'] ?? null) ? $scanData['review_items'] : [];
-
-        $vulnerabilities = array_map(
-            $this->rehydrateFinding(...),
-            array_merge($vulnData, $reviewData),
-        );
-
-        $report = new VulnerabilityReport(
-            vulnerabilities: $vulnerabilities,
-            overallScore: (int) ($scanData['overall_score'] ?? 0),
-            summary: (string) ($scanData['summary'] ?? ''),
-            ctfIdea: '',
-        );
-
-        $coverage = $this->restoreCoverage($scanData);
-
-        if ($coverage !== null) {
-            $report->setCoverage($coverage);
-        }
-
-        return $report;
-    }
-
-    /**
-     * Rebuild a single finding from saved scan data.
-     *
-     * A saved file written before finding classes existed has no 'class' key.
-     * Those entries were all assertions, so they rehydrate as assertions —
-     * FindingClass::fromString() would otherwise fail them safe into Review and
-     * silently empty out an old report's vulnerability list.
-     *
-     * @param  array<string, mixed>  $data
-     */
-    private function rehydrateFinding(array $data): Vulnerability
-    {
-        return new Vulnerability(
-            type: VulnerabilityType::fromString((string) ($data['type'] ?? 'missing_validation')),
-            location: (string) ($data['location'] ?? 'unknown'),
-            line: (int) ($data['line'] ?? 0),
-            severity: SeverityLevel::fromString((string) ($data['severity'] ?? 'low')),
-            description: (string) ($data['description'] ?? ''),
-            proof: (string) ($data['proof'] ?? ''),
-            fix: (string) ($data['fix'] ?? ''),
-            findingClass: isset($data['class'])
-                ? FindingClass::fromString((string) $data['class'])
-                : FindingClass::Vulnerability,
-            confidence: isset($data['confidence'])
-                ? Confidence::fromString((string) $data['confidence'])
-                : Confidence::Probable,
-        );
-    }
-
-    /**
-     * Rebuild the coverage record from a saved scan.
-     *
-     * Without this a regenerated report would silently reacquire an
-     * authoritative-looking score that the original scan had deliberately
-     * withheld.
-     *
-     * @param  array<string, mixed>  $scanData
-     */
-    private function restoreCoverage(array $scanData): ?ScanCoverage
-    {
-        $coverage = $scanData['coverage'] ?? null;
-
-        if (! is_array($coverage)) {
-            return null;
-        }
-
-        /** @var array<int, array{path: string, reason: string}> $skipped */
-        $skipped = [];
-
-        if (is_array($coverage['skipped_files'] ?? null)) {
-            foreach ($coverage['skipped_files'] as $entry) {
-                if (! is_array($entry)) {
-                    continue;
-                }
-
-                $skipped[] = [
-                    'path' => (string) ($entry['path'] ?? 'unknown'),
-                    'reason' => (string) ($entry['reason'] ?? ScanCoverage::REASON_AI_FAILURE),
-                ];
-            }
-        }
-
-        return new ScanCoverage(
-            filesDiscovered: (int) ($coverage['files_discovered'] ?? 0),
-            filesAnalyzed: (int) ($coverage['files_analyzed'] ?? 0),
-            skipped: $skipped,
-        );
-    }
-
-    /**
      * Resolve the output file path.
      */
-    private function resolveOutputPath(): string
+    private function resolveOutputPath(string $extension): string
     {
         $output = $this->option('output');
 
@@ -228,7 +180,7 @@ final class HackReportCommand extends Command
         /** @var string $outputBase */
         $outputBase = config('hack-auditor.report.output_path', 'hack-auditor/reports');
         $outputDir = storage_path($outputBase);
-        $filename = 'scan-'.now()->format('Y-m-d-His').'.html';
+        $filename = 'scan-'.now()->format('Y-m-d-His').'.'.$extension;
 
         return $outputDir.DIRECTORY_SEPARATOR.$filename;
     }

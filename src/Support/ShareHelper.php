@@ -29,7 +29,7 @@ final class ShareHelper
             : '';
 
         $tweet = implode("\n", [
-            "\xF0\x9F\x94\x93 AI Security Scan Results: Score {$report->overallScore}/100 | Found {$report->totalCount()} vulnerabilities{$criticalLabel}",
+            "\xF0\x9F\x94\x93 AI Security Scan Results: Score {$this->scoreText($report)} | Found {$report->totalCount()} vulnerabilities{$criticalLabel}",
             '',
             'php artisan hack:scan',
             '',
@@ -45,14 +45,21 @@ final class ShareHelper
      */
     public function markdownSummary(VulnerabilityReport $report): string
     {
-        $scoreColor = match (true) {
-            $report->overallScore >= 80 => 'brightgreen',
-            $report->overallScore >= 60 => 'yellow',
-            $report->overallScore >= 40 => 'orange',
-            default => 'red',
-        };
+        // A withheld score gets a grey "n/a" badge, never the number: a README
+        // badge reading 100/100 for a scan that analysed nothing is the most
+        // durable form of the lie the suppression exists to prevent.
+        if (! $report->scoreIsMeaningful()) {
+            $badge = '![Security Score](https://img.shields.io/badge/security%20score-n%2Fa-lightgrey)';
+        } else {
+            $scoreColor = match (true) {
+                $report->overallScore >= 80 => 'brightgreen',
+                $report->overallScore >= 60 => 'yellow',
+                $report->overallScore >= 40 => 'orange',
+                default => 'red',
+            };
 
-        $badge = "![Security Score](https://img.shields.io/badge/security%20score-{$report->overallScore}%2F100-{$scoreColor})";
+            $badge = "![Security Score](https://img.shields.io/badge/security%20score-{$report->overallScore}%2F100-{$scoreColor})";
+        }
 
         $lines = [
             $badge,
@@ -67,8 +74,16 @@ final class ShareHelper
             "| \xF0\x9F\x9F\xA2 Low | {$report->lowCount()} |",
             "| **Total** | **{$report->totalCount()}** |",
             '',
-            $report->summary,
         ];
+
+        $reason = $report->scoreSuppressionReason();
+
+        if ($reason !== null) {
+            $lines[] = "_Score withheld: {$reason}_";
+            $lines[] = '';
+        }
+
+        $lines[] = $report->summary;
 
         return implode("\n", $lines);
     }
@@ -80,7 +95,9 @@ final class ShareHelper
      */
     public function generateTweet(VulnerabilityReport $report, AIAdapter $ai, PromptBuilder $promptBuilder): string
     {
-        if (! config('hack-auditor.share.ai_tweets', true)) {
+        // The tweet prompt takes a numeric score; handing it the placeholder
+        // behind a withheld score would have the AI announce that number.
+        if (! config('hack-auditor.share.ai_tweets', true) || ! $report->scoreIsMeaningful()) {
             return $this->templateTweet($report);
         }
 
@@ -127,7 +144,7 @@ final class ShareHelper
             ? " ({$report->criticalCount()} critical)"
             : '';
 
-        return "Just scanned my Laravel app with hack-auditor. Score: {$report->overallScore}/100. Found {$report->totalCount()} vulnerabilities{$critical}. Time to fix some things.";
+        return "Just scanned my Laravel app with hack-auditor. Score: {$this->scoreText($report)}. Found {$report->totalCount()} vulnerabilities{$critical}. Time to fix some things.";
     }
 
     /**
@@ -135,7 +152,7 @@ final class ShareHelper
      */
     public function consoleShareBlock(VulnerabilityReport $report): string
     {
-        $score = str_pad((string) $report->overallScore, 3, ' ', STR_PAD_LEFT);
+        $score = str_pad($report->scoreIsMeaningful() ? $report->overallScore.'/100' : 'n/a', 7, ' ', STR_PAD_LEFT);
         $total = (string) $report->totalCount();
         $critical = (string) $report->criticalCount();
         $high = (string) $report->highCount();
@@ -149,7 +166,7 @@ final class ShareHelper
             "\xE2\x94\x8C{$hr}\xE2\x94\x90",
             "\xE2\x94\x82".$this->centerText("\xF0\x9F\x94\x93 Hack Auditor Scan Results", $innerWidth)."\xE2\x94\x82",
             "\xE2\x94\x9C{$hr}\xE2\x94\xA4",
-            "\xE2\x94\x82".$this->padRight("  Security Score: {$score}/100", $innerWidth)."\xE2\x94\x82",
+            "\xE2\x94\x82".$this->padRight("  Security Score: {$score}", $innerWidth)."\xE2\x94\x82",
             "\xE2\x94\x82".$this->padRight("  Vulnerabilities Found: {$total}", $innerWidth)."\xE2\x94\x82",
             "\xE2\x94\x9C{$hr}\xE2\x94\xA4",
             "\xE2\x94\x82".$this->padRight("  \xF0\x9F\x94\xB4 Critical: {$critical}", $innerWidth)."\xE2\x94\x82",
@@ -163,6 +180,17 @@ final class ShareHelper
         ];
 
         return implode("\n", $lines);
+    }
+
+    /**
+     * The score as shareable text: "72/100", or "withheld" when coverage
+     * cannot support a number.
+     */
+    private function scoreText(VulnerabilityReport $report): string
+    {
+        return $report->scoreIsMeaningful()
+            ? "{$report->overallScore}/100"
+            : 'withheld (incomplete coverage)';
     }
 
     /**

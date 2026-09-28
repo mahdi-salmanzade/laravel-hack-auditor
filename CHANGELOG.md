@@ -5,6 +5,70 @@ All notable changes to `laravel-hack-auditor` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-09-28
+
+A full audit of the package — detection engine, AI pipeline, reporting surface — against its own promises. It found a privacy leak, wrong line numbers on every finding in any file with a docblock, a declared dependency that could not be installed, and a dozen places where a failure was reported as a clean result. All of them are fixed here, and the scanner gains an offline mode that needs no API key.
+
+### Measured Impact
+
+- **Real-world precision held at 0 asserted false positives** over **4,769 files** from the same six applications (Monica, Akaunting, Pixelfed, BookStack, Snipe-IT, Koel — current HEADs), re-measured against a v2.2.0 build with an identical harness: 0 vulnerabilities / 28 review items without a route map, 0 / 3 with one, both identical to v2.2.0. The new write-side detection had **90 candidate shapes** in those codebases and correctly stayed silent on all of them. The only differences were **5 review items whose line moved from a docblock to the real construct** — the line-number fix below, visible on real code.
+- **`laravel-vuln-lab` still yields exactly its 7 planted findings**, and `hack:benchmark --deterministic` now owns **4 labels (was 3) at precision 1.00 / recall 1.00** — the planted `BrokenAccessControlController::destroy` (delete any user by id) is now caught deterministically.
+- **Line numbers were wrong in any file with a comment block.** Every line — AI and deterministic — was computed on text after docblocks had been stripped, blank runs collapsed and multi-line secrets redacted onto one line. A controller with a class and a method docblock reported its IDOR on **line 13 (a ` */` line) instead of 23**. Extraction is now line-preserving: across all 1,688 files of `laravel/framework/src`, line *N* of the extracted text is line *N* on disk with **0 mismatches**.
+- **`--diff` cost one AI request per changed file.** A 30-file PR made 30 requests instead of 3. Diff scans now go through the same chunked pipeline as a full scan.
+- **Test suite: 1,043 → 1,423** (3,610 assertions), green on laravel/ai 0.11 + laravel/mcp 0.9 **and** laravel/ai 1.0 + laravel/mcp 1.0.1. PHPStan level 8 clean, with 19 stale baseline entries removed.
+
+### Security
+
+- **`--verify` sent unredacted files — including `.env` — to the AI provider.** The verification pass loaded whatever `location` the model returned: absolute paths, `.env`, files never scanned, with no path guard and no secret redaction, even with `privacy.redact_secrets` on. A finding reported "at `.env`" (natural for a debug-mode finding, and easy to force with a prompt injection in a scanned comment) shipped the whole file. Verification now loads only files this run actually extracted, inside `base_path()`, not matching `scan.sensitive_patterns`, and sends them through the same redaction and line-preserving extraction as the scan pass.
+- **Secret redaction corrupted code and missed common key formats.** The string-literal pattern paired a closing quote with the next opening one, so `"... WHERE password = '" . $request->input('p') . "'"` lost its user-input concatenation — hiding the SQL injection from the AI — and validation rules like `'password' => 'required|min:8'` were redacted. Redaction now walks PHP tokens and only redacts literals bound to a secret-looking name. It newly catches Stripe (`sk_live_`, `rk_live_`, `whsec_`), GitHub (`ghp_`…, `github_pat_`), Slack tokens and webhook URLs, JWTs, AWS and Google keys, OpenAI/Anthropic keys, `BEGIN … PRIVATE KEY` blocks (line count preserved), secret `env()` defaults, and short or `export`-prefixed `.env` values.
+- **Console output could be hijacked by scanned code.** Descriptions, proofs and paths — attacker-influenced via the code under scan and the AI — were printed inside console style tags, so a description could emit OSC-8 hyperlinks, retitle the terminal, or swallow text as styling. All finding text is now escaped and stripped of control characters.
+
+### Fixed — a failure reported as a clean result
+
+- **`--diff` against an unresolvable base reported "no changed files".** A shallow CI checkout (`fetch-depth: 1`) has no base ref, so the collector returned nothing and CI went green on an unreviewed PR. It now fails with exit 2 and a message naming `fetch-depth: 0`. An explicitly requested `--base=develop` that is missing no longer silently diffs against `main` instead.
+- **`--diff` found nothing when the app lives in a monorepo subdirectory.** git reports repo-root paths (`backend/app/...`), which never matched the scan paths. The diff now runs from `base_path()` with `--relative`.
+- **`--diff --verify` reported zero verified findings** however many it paid to verify — the diff merge rebuilt the report without its verification counts. It also averaged per-file scores and ignored `--path`. All three are gone with the shared pipeline; `--diff --path=app/Http/Controllers` now narrows the diff.
+- **The MCP `scan_diff` tool returned 100/100 for an empty diff**, or one where every file failed — it merged per-file results itself, without coverage. It now shares the scanner's diff scan, coverage and score withholding.
+- **A baseline did not stop CI failing.** The exit code was computed from the unfiltered report, so `--update-baseline` followed by a scan printed zero findings and still exited 1. The gate now sees exactly what is displayed. New **`--fail-on=critical|high|medium|low|none`** (default `critical`).
+- **A missing or refused `--path` exited 0** with an empty report. It now exits 2 and the report carries `target_error`.
+- **A crash in the deterministic engine produced a clean-looking report.** It is now named in the summary, and in deterministic mode the files are recorded as unanalysed so the score is withheld.
+- **One malformed AI entry discarded a whole chunk of up to 10 files.** An unknown type, `"line": "42"`, `"fix": null` or `"overall_score": "40"` threw, and every valid finding in the chunk was lost. Entries are now validated one at a time; only an unusable one is skipped, and the reason is logged. Leading prose containing a stray `{` no longer defeats JSON extraction, and a response cut off at `max_tokens` keeps every complete finding — its unmentioned files are recorded as skipped rather than counted as reviewed.
+- **The prompt asked for path traversal, which the parser could not accept.** New types with CWE and OWASP mappings: **path traversal** (CWE-22), **unrestricted file upload** (CWE-434), **hardcoded secret** (CWE-798), **XXE** (CWE-611) and **code injection** (CWE-94, previously mislabelled as OS command injection, CWE-78). The prompt's type list is now generated from the enum, and common spellings (`lfi`, `directory traversal`, `rce`, `xsrf`, …) resolve. Unknown severities like "severe" or "moderate" no longer become Low.
+- **AI line numbers and locations were trusted as-is.** Line 0 and -7 were accepted. Lines are now clamped to the file's length, and a finding in a file that exists nowhere in the application is dropped as invented. Findings attributed to a related real file — the model behind a controller — are kept.
+- **Deduplication merged distinct findings.** It matched on basename, so `Api/UserController.php:40` and `Admin/UserController.php:42` became one finding, as did two separate SQL injections four lines apart. Paths are now compared in full. Within one source, findings collapse only when they are the same line, or within 2 lines with identical evidence (how a model reports one issue twice). Across the AI and deterministic sources, the proximity rule is unchanged. The deterministic engine also now reports one access-control finding per method when two detectors reach the same missing check.
+- **Comment-block stripping ate code.** A regex removed `/* … */`, so `glob(storage_path('exports/*.csv'))` followed later by a docblock deleted everything in between, including an entire IDOR method. Stripping is tokenised.
+- **A comment could silence the IDOR detector.** `/class\s+(\w+)/` matched `// This class exposes invoices`, resolved `App\Http\Controllers\exposes`, found no routes, and treated the endpoint as unreachable. Class names are now read from tokens everywhere.
+- **Controllers extending anything but `Controller` were not treated as controllers** (`extends ApiController`, `BaseController`), so the deterministic detectors skipped them. Classification now uses ancestry naming and path.
+- **Scan exclusions were substring matches.** Excluding `tests` dropped `ContestsController.php` and `LatestsController.php` from every scan, without a mention in coverage. Patterns now match whole path segments.
+- **The AI retried errors no retry can fix.** A rejected key, an unknown model or exhausted credits cost 2+4+8+16 = 30 seconds per chunk before the same error. They now fail on the first attempt; rate limits, overload and 5xx are still retried.
+- **The HTML report:** the score ring was drawn for a circle of radius 54 on one of radius 80 (a score of 60 filled 73%; a withheld score still filled 32%); "Copy for AI" presented review items as vulnerabilities and asked for their fix; "Files Analyzed" counted files *with findings*; finding text containing `{{FINDINGS}}` re-expanded the template.
+- **Invalid UTF-8 in a finding blanked the output** — empty `--json`, an empty saved scan, a wiped usage log. Invalid bytes are now substituted, and a corrupt usage log is moved aside instead of overwritten.
+- **"Since last scan" was always 0 with `--save`** — the scan was saved before the comparison read the latest one. `hack:report` also dropped verification, taint, confidence, coverage and usage when regenerating a saved scan; everything `toArray()` emits now round-trips.
+- **The MCP server announced itself as version 1.0.0** on every release since 1.7; it now reports the installed version.
+
+### Added
+
+- **`hack:scan --deterministic`** — only the reproducible, AST-based access-control engine: no AI request, no API key, no network, $0, identical output run to run. Also a `deterministic` argument on the MCP `scan_path` and `scan_diff` tools.
+- **`--format=table|json|sarif|markdown`** on `hack:scan`, and `--format=html|sarif|markdown --output=` on `hack:report`. SARIF 2.1.0 carries per-rule maximum severity, `security-severity`, CWE/OWASP tags, confidence as `precision`, and review items at level `note`.
+- **Stable `fingerprint` on every finding** — type, path and the normalised content of the flagged line. Baselines and scan comparisons match on it, so an accepted finding stays accepted when the AI rewords it or code above it moves, and two identical flaws in one file stay two. Old baselines are still honoured.
+- **Write-side IDOR detection** — `Model::findOrFail($id)->update()/delete()` and `Model::destroy($id)` under the same proven/review rules as fetch-and-return — plus **route-model binding without authorization** as a review question (never an assertion, never a fix).
+- `score_breakdown`, `references` (CWE and OWASP cheat-sheet links), `target_error` and `verification.unverified` in the JSON report; confidence and CWE columns in the console table; confidence, CWE, taint trace and references on HTML cards.
+- `HackAuditorManager::scanDiff()` and `HackScanner::scanDiff()` / `setDeterministic()`.
+
+### Changed
+
+- **`overall_score` is computed from the report's asserted findings** — `max(0, 100 − Σ severity weight)`, critical 40 / high 20 / medium 10 / low 5 — as the documentation always said. It was the AI's self-reported number averaged across chunks, so one critical among ten clean chunks read about 96, and identical findings could score differently run to run. Scores for the same findings will differ from v2.2.0.
+- **`laravel/mcp` 1.0.1+ is now allowed** (`^0.6|^0.7.1|^0.8|^0.9|^1.0.1`). v2.2.0 declared `laravel/ai ^1.0` while excluding `laravel/mcp` 1.x — but laravel/ai 1.0 conflicts with laravel/mcp <1.0, so **no application on laravel/ai 1.x could install this package**. laravel/mcp 1.0.0 was excluded because it dropped the `initialize` handshake; 1.0.1 restores it, verified with a live stdio handshake and `tools/list`. Token usage is read from both SDK shapes — on laravel/ai 1.x it would otherwise have recorded every scan as 0 tokens and $0, disabling `--limit`.
+- `--severity` defaults to `severity.minimum_report`; `--baseline` now requires the baseline file (exit 2 if missing); `--fix` is described as what it does ("Show suggested fixes"); `hack:ctf --all` implies `--from-scan`; `hack:demo` states that its findings are pre-recorded and copies to the clipboard only with `--copy`.
+- Config: `verification.min_severity` and `verification.downgrade_on_failure` removed — nothing ever read them. `context.include_rate_limiters`, `include_config` and `include_environment` added — they were read but never defined.
+- CI gains a laravel/ai 0.x + laravel/mcp 0.9 leg.
+- `nikic/php-parser` ^5.9, and current dev tooling (Pest 5.2, Larastan 3.12, Pint 1.32, Testbench 11.3).
+
+### Known limits
+
+- A route-bound `destroy(Invoice $invoice) { $invoice->delete(); }` without authorization is not yet reported; the binding rule covers read paths.
+- Precision on real code is measured on six applications at their current HEADs, with routes loaded statically; controller-constructor middleware is invisible to that harness, which makes it stricter than a real scan, not looser.
+
 ## [2.2.0] - 2026-08-19
 
 Completes the memory work v2.1.0 started. v2.1.0 stopped the scanner crashing; this makes it cheap, and closes a latent correctness bug that eviction had made reachable.

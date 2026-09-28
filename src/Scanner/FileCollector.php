@@ -233,12 +233,21 @@ final class FileCollector
 
     /**
      * Apply exclusion glob patterns to the Finder instance.
+     *
+     * A bare string handed to Finder::notPath() is a SUBSTRING match, so the
+     * default `*\/tests/*` exclusion used to drop ContestsController.php and
+     * LatestsController.php, and `*\/node_modules/*` dropped
+     * Models/node_modules_helper.php — silently, from a security scan. Each
+     * pattern is now compiled to a regex anchored on whole path segments.
      */
     private function applyExcludePatterns(Finder $finder): void
     {
         foreach ($this->exclude as $pattern) {
-            $normalized = trim($pattern, '*/');
-            $finder->notPath($normalized);
+            $regex = $this->segmentRegex($pattern);
+
+            if ($regex !== null) {
+                $finder->notPath($regex);
+            }
         }
     }
 
@@ -249,12 +258,44 @@ final class FileCollector
     {
         foreach ($this->sensitivePatterns as $pattern) {
             if (str_contains($pattern, '/')) {
-                $normalized = trim($pattern, '*/');
-                $finder->notPath($normalized);
+                $regex = $this->segmentRegex($pattern);
+
+                if ($regex !== null) {
+                    $finder->notPath($regex);
+                }
             } else {
                 $finder->notName($pattern);
             }
         }
+    }
+
+    /**
+     * Compile an exclude glob (`*\/tests/*`, `vendor/*`, `app/Legacy`,
+     * `*.blade.php`) into a regex that matches it as a run of whole path
+     * segments anywhere in a Finder-relative path. Leading `*\/` and trailing
+     * `/*` only mean "at any depth" / "and everything below", which the
+     * segment anchors already express; any other `*` or `?` is a glob
+     * wildcard confined to one segment.
+     */
+    private function segmentRegex(string $pattern): ?string
+    {
+        $normalized = str_replace('\\', '/', trim($pattern));
+
+        while (str_starts_with($normalized, '*/') || str_starts_with($normalized, '/')) {
+            $normalized = str_starts_with($normalized, '*/') ? substr($normalized, 2) : substr($normalized, 1);
+        }
+
+        while (str_ends_with($normalized, '/*') || str_ends_with($normalized, '/')) {
+            $normalized = str_ends_with($normalized, '/*') ? substr($normalized, 0, -2) : substr($normalized, 0, -1);
+        }
+
+        if ($normalized === '' || $normalized === '*') {
+            return null;
+        }
+
+        $body = strtr(preg_quote($normalized, '#'), ['\\*' => '[^/]*', '\\?' => '[^/]']);
+
+        return '#(?:^|/)'.$body.'(?:/|$)#';
     }
 
     /**
@@ -400,8 +441,19 @@ final class FileCollector
         $extraPaths = config('hack-auditor.context.extra_context_paths', []);
         if (is_array($extraPaths)) {
             foreach ($extraPaths as $extraPath) {
-                $absolutePath = $basePath.'/'.ltrim($extraPath, '/');
-                if (file_exists($absolutePath)) {
+                $absolutePath = $basePath.'/'.ltrim((string) $extraPath, '/');
+                $realPath = realpath($absolutePath);
+
+                // Context files are sent to the AI too: an extra path must stay
+                // inside the application and never name a secret-bearing file.
+                if ($realPath === false
+                    || ! str_starts_with($realPath, (realpath($basePath) ?: $basePath).DIRECTORY_SEPARATOR)
+                    || $this->matchesSensitivePattern($realPath)
+                    || $this->matchesSensitivePattern((string) $extraPath)) {
+                    continue;
+                }
+
+                if (is_file($absolutePath)) {
                     $context['extra'][] = $absolutePath;
                 }
             }

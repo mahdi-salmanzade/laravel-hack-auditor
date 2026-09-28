@@ -172,9 +172,12 @@ return [
         'max_context_tokens' => 8000,
         'include_routes' => true,
         'include_middleware' => true,
+        'include_rate_limiters' => true,
         'include_policies' => true,
         'include_form_requests' => true,
         'include_models' => true,
+        'include_config' => true,
+        'include_environment' => true,
         'extra_context_paths' => [],
     ],
 
@@ -183,8 +186,10 @@ return [
     | Severity Settings
     |--------------------------------------------------------------------------
     |
-    | Control the minimum severity level to include in scan reports.
-    | Available levels: Critical, High, Medium, Low, Info
+    | The default for hack:scan --severity: findings below this level are
+    | hidden AND excluded from the exit-code gate. Passing --severity on the
+    | command line overrides it.
+    | Available levels: Critical, High, Medium, Low
     |
     */
 
@@ -271,7 +276,8 @@ return [
     | request to construct a concrete exploit. Findings where the model
     | cannot produce a working exploit are downgraded one severity tier
     | (Critical→High, High→Medium). Findings with a concrete exploit keep
-    | their severity and gain an exploit_proof field.
+    | their severity and gain an exploit_proof field. The HIGH+ threshold and
+    | the downgrade behaviour are fixed; only 'enabled' is configurable.
     |
     | Cost note: verification roughly doubles API spend on scans with many
     | HIGH+ findings. Leave disabled by default; enable when FP rate matters
@@ -281,8 +287,6 @@ return [
 
     'verification' => [
         'enabled' => env('HACK_AUDITOR_VERIFY', false),
-        'min_severity' => 'High',
-        'downgrade_on_failure' => true,
     ],
 
 ];

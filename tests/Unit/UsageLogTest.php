@@ -181,3 +181,24 @@ it('creates directory if not exists', function (): void {
     rmdir(dirname($nestedPath, 2));
     rmdir(dirname($nestedPath, 3));
 });
+
+it('does not wipe existing entries when a new entry contains invalid UTF-8', function (): void {
+    $log = new UsageLog($this->logPath);
+    $log->record(createTrackerWithUsage(100, 10), ['path' => 'app']);
+    $log->record(createTrackerWithUsage(200, 20), ['path' => "caf\xE9"]);
+
+    expect($log->scanCount())->toBe(2)
+        ->and($log->totalTokens())->toBe(330);
+});
+
+it('preserves an unreadable log instead of overwriting it', function (): void {
+    file_put_contents($this->logPath, '{"truncated": [');
+
+    (new UsageLog($this->logPath))->record(createTrackerWithUsage(10, 1));
+
+    $preserved = glob($this->logPath.'.corrupt-*') ?: [];
+
+    expect($preserved)->toHaveCount(1)
+        ->and(file_get_contents($preserved[0]))->toBe('{"truncated": [')
+        ->and((new UsageLog($this->logPath))->scanCount())->toBe(1);
+});

@@ -9,6 +9,7 @@ use Laravel\Mcp\ResponseFactory;
 use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
+use Mahdi\HackAuditor\Support\References;
 
 /**
  * Formats a VulnerabilityReport into an MCP tool response.
@@ -25,12 +26,12 @@ final class FindingFormatter
     public static function report(VulnerabilityReport $report, string $scope): ResponseFactory
     {
         $findings = array_map(
-            static fn (Vulnerability $vulnerability): array => self::finding($vulnerability),
+            static fn (Vulnerability $vulnerability): array => self::finding($vulnerability, $report->fingerprintOf($vulnerability)),
             $report->confirmedVulnerabilities(),
         );
 
         $reviewItems = array_map(
-            static fn (Vulnerability $vulnerability): array => self::finding($vulnerability),
+            static fn (Vulnerability $vulnerability): array => self::finding($vulnerability, $report->fingerprintOf($vulnerability)),
             $report->reviewItems(),
         );
 
@@ -42,6 +43,10 @@ final class FindingFormatter
             'overall_score' => $report->scoreIsMeaningful() ? $report->overallScore : null,
             'score_suppressed' => ! $report->scoreIsMeaningful(),
             'score_suppression_reason' => $report->scoreSuppressionReason(),
+            // Null alongside a withheld score, so an agent cannot rebuild the
+            // number the suppression withheld from its parts.
+            'score_breakdown' => $report->scoreBreakdown(),
+            'target_error' => $report->getTargetError(),
             'coverage' => $report->getCoverage()?->toArray(),
             'coverage_statement' => $report->coverageStatement(),
             'summary' => $report->summary,
@@ -68,11 +73,16 @@ final class FindingFormatter
     /**
      * Reduce a vulnerability to the fields an AI agent needs to act.
      *
+     * The fingerprint lets an agent track one finding across re-scans (it
+     * survives rewording and edits above the line); references point it at an
+     * authority other than this tool before it changes any code.
+     *
      * @return array<string, mixed>
      */
-    private static function finding(Vulnerability $vulnerability): array
+    private static function finding(Vulnerability $vulnerability, string $fingerprint): array
     {
-        return [
+        $data = [
+            'fingerprint' => $fingerprint,
             'type' => $vulnerability->type->value,
             'type_label' => $vulnerability->type->label(),
             'severity' => $vulnerability->severity->value,
@@ -85,10 +95,17 @@ final class FindingFormatter
             'line' => $vulnerability->line,
             'owasp' => $vulnerability->type->owaspCategory(),
             'cwe' => $vulnerability->type->cweId(),
+            'references' => References::for($vulnerability->type),
             'description' => $vulnerability->description,
             'proof' => $vulnerability->proof,
             'fix' => $vulnerability->fix,
         ];
+
+        if ($vulnerability->taintTrace !== null) {
+            $data['taint_trace'] = $vulnerability->taintTrace;
+        }
+
+        return $data;
     }
 
     /**

@@ -5,23 +5,27 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Log;
 
 use function Laravel\Prompts\spin;
 
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
+use Mahdi\HackAuditor\Report\MarkdownReportGenerator;
+use Mahdi\HackAuditor\Report\SarifReportGenerator;
 use Mahdi\HackAuditor\Scanner\Baseline;
 use Mahdi\HackAuditor\Scanner\FileCollector;
-use Mahdi\HackAuditor\Scanner\GitDiffCollector;
 use Mahdi\HackAuditor\Scanner\HackScanner;
 use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 use Mahdi\HackAuditor\Support\AiProviders;
+use Mahdi\HackAuditor\Support\ConsoleText;
+use Mahdi\HackAuditor\Support\References;
 use Mahdi\HackAuditor\Support\ScanHistory;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\UsageLog;
 use Mahdi\HackAuditor\Support\UsageTracker;
+use Symfony\Component\Console\Output\ConsoleOutputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
 
 final class HackScanCommand extends Command
 {
@@ -32,20 +36,23 @@ final class HackScanCommand extends Command
      */
     protected $signature = 'hack:scan
         {--path= : Scan a specific file or directory}
-        {--severity=Low : Minimum severity to report}
-        {--fix : Auto-generate fixes}
-        {--json : Output as JSON}
+        {--severity= : Minimum severity to report and gate on (default: config severity.minimum_report, else Low)}
+        {--fix : Show suggested fixes (only for confirmed findings that carry one)}
+        {--json : Output as JSON (alias for --format=json)}
+        {--format= : Output format: table, json, sarif or markdown (default: table)}
+        {--fail-on=critical : Exit 1 when a confirmed finding at or above this severity remains after filters: critical, high, medium, low or none}
         {--html : Generate an HTML report}
         {--save : Save results to JSON file}
         {--force : Skip confirmation prompt for large scans}
         {--detailed : Show full descriptions in the table instead of truncating}
         {--diff : Only scan files changed in the current git branch}
         {--base= : Base branch for --diff comparison (default: auto-detect main/master)}
-        {--baseline : Apply baseline to suppress known findings (on by default if file exists)}
+        {--baseline : Require the baseline: fail with exit 2 if the baseline file is missing (it is applied automatically whenever it exists)}
         {--no-baseline : Ignore the baseline file}
         {--update-baseline : Save current findings as the new baseline}
         {--limit= : Maximum token budget for this scan (stops scanning when reached)}
-        {--verify : Run multi-pass exploit verification on HIGH+ findings (doubles API cost on those findings)}';
+        {--verify : Run multi-pass exploit verification on HIGH+ findings (doubles API cost on those findings)}
+        {--deterministic : Run only the reproducible access-control engine — no AI request, no API key, no cost}';
 
     /**
      * The console command description.
@@ -63,13 +70,52 @@ final class HackScanCommand extends Command
     ];
 
     /**
+     * Output formats accepted by --format.
+     *
+     * @var array<int, string>
+     */
+    private const array FORMATS = ['table', 'json', 'sarif', 'markdown'];
+
+    /**
+     * Resolved --format value.
+     */
+    private string $format = 'table';
+
+    /**
+     * Resolved --severity value.
+     */
+    private SeverityLevel $minimumSeverity = SeverityLevel::Low;
+
+    /**
+     * Resolved --fail-on threshold; null means never fail on findings.
+     */
+    private ?SeverityLevel $failOnThreshold = SeverityLevel::Critical;
+
+    /**
+     * How many findings the baseline suppressed in this run.
+     */
+    private int $baselineSuppressed = 0;
+
+    /**
      * Execute the console command.
      */
     public function handle(): int
     {
         $startTime = hrtime(true);
 
-        if (! $this->option('json')) {
+        // Validate every option BEFORE the scan: a typo in --format or
+        // --fail-on must not be discovered after paying for the AI requests.
+        $optionError = $this->resolveOptions();
+
+        if ($optionError !== null) {
+            $this->components->error($optionError);
+
+            return self::INVALID;
+        }
+
+        $machineOutput = $this->isMachineOutput();
+
+        if (! $machineOutput) {
             $this->displayBanner();
             $this->line('');
 
@@ -78,7 +124,9 @@ final class HackScanCommand extends Command
             $fileCount = $this->estimateFileCount();
 
             $this->line('  <fg=gray>target</>   '.$fileCount.' files');
-            $this->line('  <fg=gray>engine</>   '.$provider.' / '.$model);
+            $this->line('  <fg=gray>engine</>   '.($this->option('deterministic')
+                ? 'deterministic access-control engine (no AI, $0)'
+                : $provider.' / '.$model));
             $this->line('');
             $this->line('  <fg=yellow>●</> Collecting files...');
         }
@@ -91,18 +139,21 @@ final class HackScanCommand extends Command
         $tracker = UsageTracker::forCurrentConfig($tokenLimit);
         $scanner->setUsageTracker($tracker);
 
-        $verifyEnabled = $this->option('verify') || (bool) config('hack-auditor.verification.enabled', false);
+        $deterministic = (bool) $this->option('deterministic');
+        $scanner->setDeterministic($deterministic);
+
+        $verifyEnabled = ! $deterministic
+            && ($this->option('verify') || (bool) config('hack-auditor.verification.enabled', false));
         $scanner->setVerify($verifyEnabled);
 
-        if (! $this->option('json') && $tracker->isLimitSet()) {
+        if (! $machineOutput && $tracker->isLimitSet()) {
             $this->line('  <fg=gray>limit</>    '.number_format($tracker->getTokenLimit()).' tokens');
         }
 
         $path = $this->option('path');
 
         if (! is_string($path) || $path === '') {
-            if (! $this->option('json') && ! $this->option('force')) {
-                $fileCount = $fileCount ?? $this->estimateFileCount();
+            if (! $machineOutput && ! $this->option('force') && ! $deterministic && ! $this->option('diff')) {
                 /** @var int $threshold */
                 $threshold = config('hack-auditor.scan.confirm_above_files', 20);
 
@@ -126,7 +177,7 @@ final class HackScanCommand extends Command
 
         $scanCallback = function () use ($scanner, $path): VulnerabilityReport {
             if ($this->option('diff')) {
-                return $this->scanDiff($scanner);
+                return $scanner->scanDiff($this->diffBaseBranch(), is_string($path) && $path !== '' ? $path : null);
             }
 
             if (is_string($path) && $path !== '') {
@@ -142,11 +193,11 @@ final class HackScanCommand extends Command
         // already paid for real requests. Record the spend, then rethrow.
         try {
             /** @var VulnerabilityReport $report */
-            $report = $this->option('json')
+            $report = $machineOutput
                 ? $scanCallback()
                 : spin(
                     callback: $scanCallback,
-                    message: 'Analyzing files with AI...',
+                    message: $deterministic ? 'Analyzing files...' : 'Analyzing files with AI...',
                 );
         } catch (\Throwable $e) {
             $this->logUsage($tracker, null);
@@ -155,9 +206,20 @@ final class HackScanCommand extends Command
         }
 
         $elapsedMs = (int) ((hrtime(true) - $startTime) / 1_000_000);
-        $minimumSeverity = SeverityLevel::fromString((string) $this->option('severity'));
-        $filteredVulnerabilities = $this->filterBySeverity($report->vulnerabilities, $minimumSeverity);
-        $filteredVulnerabilities = $this->applyBaseline($filteredVulnerabilities);
+
+        // Runs before any early return so every output mode still logs spend.
+        $this->logUsage($tracker, $report);
+
+        // A missing, refused or unresolvable target means nothing was scanned.
+        // Exit 2 in every output mode: a mistyped --path in CI must fail the
+        // job, not pass it with an empty "0 vulnerabilities" report. Such a run
+        // is never saved, so it cannot become the "previous scan" either.
+        if ($report->getTargetError() !== null) {
+            return $this->outputTargetError($report, $elapsedMs);
+        }
+
+        $filteredVulnerabilities = $this->filterBySeverity($report->vulnerabilities, $this->minimumSeverity);
+        $filteredVulnerabilities = $this->applyBaseline($filteredVulnerabilities, $report);
 
         // Two classes, never mixed: assertions the analyzer can back with an
         // evidence chain, and questions it wants a human to answer. Only the
@@ -165,38 +227,16 @@ final class HackScanCommand extends Command
         $confirmed = $this->onlyConfirmed($filteredVulnerabilities);
         $reviewItems = $this->onlyReviewItems($filteredVulnerabilities);
 
-        // These run before any early return so --json mode still logs and saves
-        $this->logUsage($tracker, $report);
+        // The build gate sees exactly what the user sees: confirmed findings
+        // that survived --severity and the baseline, at or above --fail-on.
+        $exitCode = $this->exitCodeFor($confirmed);
+
+        // Read the previous scan BEFORE saving this one — otherwise --save makes
+        // this scan its own predecessor and the delta is always 0.
+        $previousScan = $this->latestSavedScan();
 
         if ($this->option('save')) {
             $this->saveResults($report, $elapsedMs);
-        }
-
-        if ($this->option('json')) {
-            return $this->outputJson($report, $confirmed, $reviewItems, $elapsedMs);
-        }
-
-        $this->line('  <fg=green>✓</> Scan complete <fg=gray>('.round($elapsedMs / 1000, 1).'s)</>');
-        $this->newLine();
-        $this->displayAnalyzedPaths();
-
-        $this->displayFileSummary($report);
-        $this->newLine();
-        $this->displayCoverage($report);
-        $this->displayScore($report);
-        $this->newLine();
-        $this->displaySummary($report->summary);
-        $this->newLine();
-
-        $this->displayConfirmedSection($report, $confirmed);
-        $this->displayReviewSection($reviewItems);
-
-        $this->displayStats($confirmed, $reviewItems, $minimumSeverity);
-        $this->newLine();
-
-        if ($this->option('fix') && count($confirmed) > 0) {
-            $this->displayFixes($confirmed);
-            $this->newLine();
         }
 
         if ($this->option('update-baseline')) {
@@ -207,7 +247,48 @@ final class HackScanCommand extends Command
             $this->generateHtmlReport($report, $elapsedMs);
         }
 
-        $this->displayScanComparison($report);
+        if ($this->format === 'json') {
+            $this->outputJson($report, $confirmed, $reviewItems, $elapsedMs);
+
+            return $exitCode;
+        }
+
+        if ($this->format === 'sarif') {
+            $this->writeRaw((new SarifReportGenerator)->generate($report, $confirmed, $reviewItems));
+
+            return $exitCode;
+        }
+
+        if ($this->format === 'markdown') {
+            $this->writeRaw((new MarkdownReportGenerator)->generate($report, $confirmed, $reviewItems));
+
+            return $exitCode;
+        }
+
+        $this->line('  <fg=green>✓</> Scan complete <fg=gray>('.round($elapsedMs / 1000, 1).'s)</>');
+        $this->newLine();
+        $this->displayAnalyzedPaths();
+
+        $this->displayFileSummary($confirmed, $reviewItems);
+        $this->newLine();
+        $this->displayCoverage($report);
+        $this->displayScore($report);
+        $this->newLine();
+        $this->displaySummary($report->summary);
+        $this->newLine();
+
+        $this->displayConfirmedSection($report, $confirmed);
+        $this->displayReviewSection($reviewItems);
+
+        $this->displayStats($confirmed, $reviewItems, $this->minimumSeverity);
+        $this->newLine();
+
+        if ($this->option('fix') && count($confirmed) > 0) {
+            $this->displayFixes($confirmed);
+            $this->newLine();
+        }
+
+        $this->displayScanComparison($report, $previousScan);
 
         $this->displayVerificationSummary($report);
 
@@ -217,9 +298,190 @@ final class HackScanCommand extends Command
 
         $this->components->info('Run `<fg=cyan>php artisan hack:ctf</>` to generate CTF challenges from these findings');
 
-        // hasCritical() counts CONFIRMED vulnerabilities only, so a review item
-        // can never fail a build no matter how bad it would be if it were real.
-        return $report->hasCritical() ? self::FAILURE : self::SUCCESS;
+        return $exitCode;
+    }
+
+    /**
+     * The --diff base: --base, else the configured diff base, else null to
+     * auto-detect main/master.
+     */
+    private function diffBaseBranch(): ?string
+    {
+        $base = $this->option('base');
+
+        if (is_string($base) && trim($base) !== '') {
+            return trim($base);
+        }
+
+        /** @var ?string $configured */
+        $configured = config('hack-auditor.scan.diff_base_branch');
+
+        return is_string($configured) && $configured !== '' ? $configured : null;
+    }
+
+    /**
+     * Resolve and validate --format, --json, --severity, --fail-on and the
+     * baseline flags. Returns an error message, or null when all are valid.
+     */
+    private function resolveOptions(): ?string
+    {
+        $format = $this->option('format');
+        $format = is_string($format) && $format !== '' ? strtolower(trim($format)) : null;
+
+        if ($this->option('json')) {
+            if ($format !== null && $format !== 'json') {
+                return "--json conflicts with --format={$format}. Use one or the other.";
+            }
+
+            $format = 'json';
+        }
+
+        $format ??= 'table';
+
+        if (! in_array($format, self::FORMATS, true)) {
+            return "Unknown --format '{$format}'. Use one of: ".implode(', ', self::FORMATS).'.';
+        }
+
+        $this->format = $format;
+
+        $severityOption = $this->option('severity');
+        $configSeverity = config('hack-auditor.severity.minimum_report', 'Low');
+        $severity = is_string($severityOption) && $severityOption !== ''
+            ? $severityOption
+            : (is_string($configSeverity) && $configSeverity !== '' ? $configSeverity : 'Low');
+
+        $resolvedSeverity = $this->parseSeverity($severity);
+
+        if ($resolvedSeverity === null) {
+            return "Unknown severity '{$severity}'. Use one of: ".$this->severityNames().'.';
+        }
+
+        $this->minimumSeverity = $resolvedSeverity;
+
+        $failOn = $this->option('fail-on');
+        $failOn = is_string($failOn) && $failOn !== '' ? strtolower(trim($failOn)) : 'critical';
+
+        if ($failOn === 'none') {
+            $this->failOnThreshold = null;
+        } else {
+            $threshold = $this->parseSeverity($failOn);
+
+            if ($threshold === null) {
+                return "Unknown --fail-on '{$failOn}'. Use one of: ".$this->severityNames().', none.';
+            }
+
+            $this->failOnThreshold = $threshold;
+        }
+
+        if ($this->option('baseline') && $this->option('no-baseline')) {
+            return '--baseline and --no-baseline contradict each other. Use one.';
+        }
+
+        if ($this->option('baseline')) {
+            $baseline = new Baseline;
+
+            if (! $baseline->exists()) {
+                return 'No baseline file at '.$baseline->resolvePath().'. --baseline requires one; create it with --update-baseline.';
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Parse a severity name strictly. SeverityLevel::fromString() falls back
+     * to Low on a typo, which would silently turn "--fail-on=hgih" into the
+     * strictest possible gate.
+     */
+    private function parseSeverity(string $value): ?SeverityLevel
+    {
+        return SeverityLevel::tryFrom(strtolower(trim($value)));
+    }
+
+    /**
+     * Comma-separated list of valid severity values.
+     */
+    private function severityNames(): string
+    {
+        return implode(', ', array_map(static fn (SeverityLevel $s): string => $s->value, SeverityLevel::cases()));
+    }
+
+    /**
+     * Whether stdout carries a machine-readable document that must contain
+     * nothing but that document.
+     */
+    private function isMachineOutput(): bool
+    {
+        return $this->format !== 'table';
+    }
+
+    /**
+     * Decide the exit code from the findings that survived every filter.
+     *
+     * Previously the gate read the UNFILTERED report, so a critical finding
+     * the team had accepted into the baseline — or one hidden by --severity —
+     * still failed the build while the output showed nothing wrong.
+     *
+     * @param  array<int, Vulnerability>  $confirmed
+     */
+    private function exitCodeFor(array $confirmed): int
+    {
+        if ($this->failOnThreshold === null) {
+            return self::SUCCESS;
+        }
+
+        // Ranked by the scoring weight so any severity level SeverityLevel
+        // defines is ordered correctly without a second lookup table.
+        $thresholdWeight = $this->failOnThreshold->weight();
+
+        foreach ($confirmed as $finding) {
+            if ($finding->isConfirmedVulnerability() && $finding->severity->weight() >= $thresholdWeight) {
+                return self::FAILURE;
+            }
+        }
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Report a scan whose target could not be analysed, and exit 2.
+     */
+    private function outputTargetError(VulnerabilityReport $report, int $elapsedMs): int
+    {
+        if ($this->format === 'json') {
+            $this->outputJson($report, [], [], $elapsedMs);
+
+            return self::INVALID;
+        }
+
+        if ($this->format === 'sarif') {
+            $this->writeRaw((new SarifReportGenerator)->generate($report, [], []));
+
+            return self::INVALID;
+        }
+
+        if ($this->format === 'markdown') {
+            $this->writeRaw((new MarkdownReportGenerator)->generate($report, [], []));
+
+            return self::INVALID;
+        }
+
+        $this->newLine();
+        $this->components->error('Nothing was scanned: '.ConsoleText::clean((string) $report->getTargetError()));
+
+        return self::INVALID;
+    }
+
+    /**
+     * Write a machine-readable document to stdout exactly as given.
+     *
+     * OUTPUT_RAW bypasses the console formatter: through line(), a finding
+     * description containing "<error>" or "<href=…>" would be interpreted as a
+     * style tag and silently removed from the JSON/SARIF, corrupting the data.
+     */
+    private function writeRaw(string $document): void
+    {
+        $this->output->writeln($document, OutputInterface::OUTPUT_RAW);
     }
 
     /**
@@ -246,9 +508,9 @@ final class HackScanCommand extends Command
      *
      * This is a DISPLAY filter over both classes — for a review item severity
      * means "impact if this turns out to be real", so the same threshold hides
-     * the quiet ones. It is not the build gate: the exit code is decided by
-     * VulnerabilityReport::hasCritical(), which sees confirmed vulnerabilities
-     * only, so no --severity value can ever promote a question into a failure.
+     * the quiet ones. The build gate (exitCodeFor) then reads only the
+     * CONFIRMED findings that survived this filter, so no --severity value can
+     * ever promote a question into a failure.
      *
      * @param  array<int, Vulnerability>  $vulnerabilities
      * @return array<int, Vulnerability>
@@ -309,10 +571,17 @@ final class HackScanCommand extends Command
 
     /**
      * Display the file collection summary line.
+     *
+     * Counts the same filtered lists as displayStats() and the exit code. It
+     * used to count the unfiltered report, so the header said "3
+     * vulnerabilities" while the footer, after --severity or the baseline,
+     * said 1.
+     *
+     * @param  array<int, Vulnerability>  $confirmed
+     * @param  array<int, Vulnerability>  $reviewItems
      */
-    private function displayFileSummary(VulnerabilityReport $report): void
+    private function displayFileSummary(array $confirmed, array $reviewItems): void
     {
-        $confirmed = $report->confirmedVulnerabilities();
         $findings = count($confirmed);
         $uniqueLocations = count(array_unique(array_map(
             fn (Vulnerability $v): string => $v->location,
@@ -324,10 +593,14 @@ final class HackScanCommand extends Command
         // ("0 vulnerabilities across 0 files") read as "0 files were scanned".
         $this->components->info("Found <options=bold>{$findings}</> vulnerabilities in <options=bold>{$uniqueLocations}</> affected file(s)");
 
-        $reviewCount = $report->reviewCount();
+        $reviewCount = count($reviewItems);
 
         if ($reviewCount > 0) {
             $this->line("  <fg=gray>plus</>     <fg=yellow>{$reviewCount}</> item(s) flagged for human review <fg=gray>(not counted as vulnerabilities)</>");
+        }
+
+        if ($this->baselineSuppressed > 0) {
+            $this->line("  <fg=gray>baseline</> {$this->baselineSuppressed} known finding(s) suppressed");
         }
     }
 
@@ -381,7 +654,7 @@ final class HackScanCommand extends Command
             $this->line('  <fg=yellow>'.ucfirst(ScanCoverage::reasonLabel($reason)).':</>');
 
             foreach ($paths as $path) {
-                $this->line("    <fg=gray>-</> <fg=cyan>{$path}</>");
+                $this->line('    <fg=gray>-</> <fg=cyan>'.ConsoleText::clean($path).'</>');
             }
         }
 
@@ -462,6 +735,37 @@ final class HackScanCommand extends Command
         $this->line("  <fg={$color};options=bold>║   Security Score      ║</>");
         $this->line("  <fg={$color};options=bold>║       {$score}/100           ║</>");
         $this->line("  <fg={$color};options=bold>╚═══════════════════════╝</>");
+
+        $this->displayScoreBreakdown($report);
+    }
+
+    /**
+     * Show how the score was derived, so it can be checked by hand.
+     *
+     * Only printed when the breakdown reproduces the reported score: a
+     * derivation that does not add up would be worse than none.
+     */
+    private function displayScoreBreakdown(VulnerabilityReport $report): void
+    {
+        $breakdown = $report->scoreBreakdown();
+
+        if ($breakdown === null || $breakdown['score'] !== $report->overallScore) {
+            return;
+        }
+
+        $terms = [];
+
+        foreach ($breakdown['severities'] as $entry) {
+            if ($entry['count'] > 0) {
+                $terms[] = "{$entry['count']}×{$entry['weight']} {$entry['severity']}";
+            }
+        }
+
+        $derivation = $terms === []
+            ? '100 − 0 (no confirmed vulnerabilities)'
+            : 'max(0, 100 − '.implode(' − ', $terms).')';
+
+        $this->line("  <fg=gray>score = {$derivation}</>");
     }
 
     /**
@@ -472,11 +776,11 @@ final class HackScanCommand extends Command
         $paragraphs = preg_split('/\n{2,}/', trim($summary));
 
         foreach ($paragraphs as $index => $paragraph) {
-            $paragraph = preg_replace('/\s+/', ' ', trim($paragraph));
+            $paragraph = (string) preg_replace('/\s+/', ' ', trim(ConsoleText::stripControlCharacters($paragraph)));
             $wrapped = wordwrap($paragraph, 100);
 
             foreach (explode("\n", $wrapped) as $line) {
-                $this->line("  <fg=gray>{$line}</>");
+                $this->line('  <fg=gray>'.ConsoleText::clean($line).'</>');
             }
 
             if ($index < count($paragraphs) - 1) {
@@ -507,7 +811,7 @@ final class HackScanCommand extends Command
             $this->line('  <fg=green>No confirmed vulnerabilities.</> <fg=gray>Nothing below was proven exploitable.</>');
 
             foreach (explode("\n", wordwrap($report->coverageStatement(), 100)) as $line) {
-                $this->line("  <fg=gray>{$line}</>");
+                $this->line('  <fg=gray>'.ConsoleText::clean($line).'</>');
             }
 
             $this->newLine();
@@ -549,11 +853,13 @@ final class HackScanCommand extends Command
         foreach ($this->sortBySeverity($reviewItems) as $index => $item) {
             $number = $index + 1;
 
-            $this->line("  <fg=yellow>?</> <options=bold>#{$number} {$item->type->label()}</> <fg=cyan>{$item->location}:{$item->line}</>");
+            $location = ConsoleText::clean("{$item->location}:{$item->line}");
+
+            $this->line("  <fg=yellow>?</> <options=bold>#{$number} {$item->type->label()}</> <fg=cyan>{$location}</>");
             $this->line("    <fg=gray>Impact if real:</> {$item->severity->label()}  <fg=gray>Confidence:</> <fg=yellow>{$item->confidence->label()}</>");
 
-            foreach (explode("\n", wordwrap($this->asQuestion($item->description), 96)) as $line) {
-                $this->line("    <fg=gray>{$line}</>");
+            foreach (explode("\n", wordwrap($this->asQuestion(ConsoleText::stripControlCharacters($item->description)), 96)) as $line) {
+                $this->line('    <fg=gray>'.ConsoleText::clean($line).'</>');
             }
 
             $this->newLine();
@@ -580,6 +886,10 @@ final class HackScanCommand extends Command
     /**
      * Display the vulnerability results as a styled console table.
      *
+     * Every cell of finding text is escaped: the table renderer runs cells
+     * through the console formatter, so an unescaped "<href=…>" in an AI
+     * description becomes a live terminal hyperlink.
+     *
      * @param  array<int, Vulnerability>  $vulnerabilities
      */
     private function displayVulnerabilityTable(array $vulnerabilities): void
@@ -589,21 +899,24 @@ final class HackScanCommand extends Command
 
         $rows = [];
         foreach ($sorted as $index => $vuln) {
+            $description = ConsoleText::stripControlCharacters($vuln->description);
             $description = $isVerbose
-                ? $vuln->description
-                : $this->truncateDescription($vuln->description, 120);
+                ? $description
+                : $this->truncateDescription($description, 120);
 
             $rows[] = [
                 '<fg=gray>'.($index + 1).'</>',
                 $vuln->severity->label(),
                 "<options=bold>{$vuln->type->label()}</>",
-                "<fg=cyan>{$vuln->location}:{$vuln->line}</>",
-                $description,
+                '<fg=cyan>'.ConsoleText::clean("{$vuln->location}:{$vuln->line}").'</>',
+                $vuln->confidence->label(),
+                $vuln->type->cweId(),
+                ConsoleText::clean($description),
             ];
         }
 
         $this->table(
-            ['<options=bold>#</>', '<options=bold>Severity</>', '<options=bold>Type</>', '<options=bold>Location:Line</>', '<options=bold>Description</>'],
+            ['<options=bold>#</>', '<options=bold>Severity</>', '<options=bold>Type</>', '<options=bold>Location:Line</>', '<options=bold>Confidence</>', '<options=bold>CWE</>', '<options=bold>Description</>'],
             $rows,
         );
     }
@@ -623,13 +936,31 @@ final class HackScanCommand extends Command
         foreach ($sorted as $index => $vuln) {
             $number = $index + 1;
             $this->line("  <fg=cyan;options=bold>━━━ #{$number}: {$vuln->type->label()} ━━━</>");
-            $this->line("  <fg=gray>Location:</> <fg=cyan>{$vuln->location}:{$vuln->line}</>");
+            $this->line('  <fg=gray>Location:</> <fg=cyan>'.ConsoleText::clean("{$vuln->location}:{$vuln->line}").'</>');
             $this->line("  <fg=gray>Severity:</> {$vuln->severity->label()}");
+            $this->line("  <fg=gray>Confidence:</> {$vuln->confidence->label()} <fg=gray>— {$vuln->confidence->explanation()}</>");
+            $this->line("  <fg=gray>CWE:</> {$vuln->type->cweId()} <fg=gray>({$vuln->type->owaspCategory()})</>");
+
+            $cweUrl = References::cweUrl($vuln->type);
+
+            if ($cweUrl !== null) {
+                $this->line("  <fg=gray>Reference:</> {$cweUrl}");
+            }
+
             $this->newLine();
             $this->line('  <fg=white;options=bold>Description:</>');
 
-            foreach (explode("\n", wordwrap($vuln->description, 100)) as $descLine) {
-                $this->line("    <fg=gray>{$descLine}</>");
+            foreach (explode("\n", wordwrap(ConsoleText::stripControlCharacters($vuln->description), 100)) as $descLine) {
+                $this->line('    <fg=gray>'.ConsoleText::clean($descLine).'</>');
+            }
+
+            if ($vuln->taintTrace !== null && trim($vuln->taintTrace) !== '') {
+                $this->newLine();
+                $this->line('  <fg=white;options=bold>Taint trace:</>');
+
+                foreach (explode("\n", ConsoleText::stripControlCharacters($vuln->taintTrace)) as $traceLine) {
+                    $this->line('    <fg=gray>'.ConsoleText::clean($traceLine).'</>');
+                }
             }
 
             $this->newLine();
@@ -704,14 +1035,14 @@ final class HackScanCommand extends Command
         foreach ($sorted as $index => $vuln) {
             $number = $index + 1;
             $this->line("  <fg=cyan;options=bold>━━━ Fix #{$number}: {$vuln->type->label()} ━━━</>");
-            $this->line("  <fg=gray>Location:</> <fg=cyan>{$vuln->location}:{$vuln->line}</>");
+            $this->line('  <fg=gray>Location:</> <fg=cyan>'.ConsoleText::clean("{$vuln->location}:{$vuln->line}").'</>');
             $this->line("  <fg=gray>Severity:</> {$vuln->severity->label()}");
             $this->newLine();
             $this->line('  <fg=green;options=bold>Recommended fix:</>');
             $this->newLine();
 
-            foreach (explode("\n", $vuln->fix) as $fixLine) {
-                $this->line("    <fg=green>{$fixLine}</>");
+            foreach (explode("\n", ConsoleText::stripControlCharacters($vuln->fix)) as $fixLine) {
+                $this->line('    <fg=green>'.ConsoleText::clean($fixLine).'</>');
             }
 
             $this->newLine();
@@ -719,64 +1050,54 @@ final class HackScanCommand extends Command
     }
 
     /**
-     * Output the full report as JSON and return the exit code.
+     * Output the report as JSON.
      *
-     * `vulnerabilities` carries assertions only; questions live under
-     * `review_items` so an existing consumer that counts `vulnerabilities`
-     * cannot be handed a number inflated by things nobody proved.
+     * Built from VulnerabilityReport::toArray() so every field the report
+     * knows about (fingerprints, references, score breakdown, target error,
+     * coverage, usage, verification) is emitted, then narrowed to the findings
+     * that survived --severity and the baseline. `vulnerabilities` carries
+     * assertions only; questions live under `review_items` so an existing
+     * consumer that counts `vulnerabilities` cannot be handed a number
+     * inflated by things nobody proved.
      *
      * @param  array<int, Vulnerability>  $confirmed
      * @param  array<int, Vulnerability>  $reviewItems
      */
-    private function outputJson(VulnerabilityReport $report, array $confirmed, array $reviewItems, int $elapsedMs): int
+    private function outputJson(VulnerabilityReport $report, array $confirmed, array $reviewItems, int $elapsedMs): void
     {
-        $output = [
-            'overall_score' => $report->scoreIsMeaningful() ? $report->overallScore : null,
-            'score_suppressed' => ! $report->scoreIsMeaningful(),
-            'score_suppression_reason' => $report->scoreSuppressionReason(),
-            'coverage' => $report->getCoverage()?->toArray(),
-            'coverage_statement' => $report->coverageStatement(),
-            'summary' => $report->summary,
-            'ctf_idea' => $report->ctfIdea,
-            'scan_duration_ms' => $elapsedMs,
-            'counts' => [
-                'total' => count($confirmed),
-                'critical' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Critical)),
-                'high' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::High)),
-                'medium' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Medium)),
-                'low' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Low)),
-                'review' => count($reviewItems),
-            ],
-            'vulnerabilities' => array_map(
-                fn (Vulnerability $v): array => $v->toArray(),
-                $confirmed,
-            ),
-            'review_items' => array_map(
-                fn (Vulnerability $v): array => $v->toArray(),
-                $reviewItems,
-            ),
+        $output = $report->toArray();
+
+        $output['scan_duration_ms'] = $elapsedMs;
+        $output['counts'] = [
+            'total' => count($confirmed),
+            'critical' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Critical)),
+            'high' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::High)),
+            'medium' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Medium)),
+            'low' => count(array_filter($confirmed, fn (Vulnerability $v): bool => $v->severity === SeverityLevel::Low)),
+            'review' => count($reviewItems),
+        ];
+        $output['vulnerabilities'] = $report->findingsToArray($confirmed);
+        $output['review_items'] = $report->findingsToArray($reviewItems);
+        $output['filters'] = [
+            'minimum_severity' => $this->minimumSeverity->value,
+            'baseline_suppressed' => $this->baselineSuppressed,
+            'fail_on' => $this->failOnThreshold === null ? 'none' : $this->failOnThreshold->value,
         ];
 
-        if ($report->hasUsageData()) {
-            $output['usage'] = $report->getUsageTracker()->toArray();
-            $output['files_skipped'] = $report->getFilesSkipped();
-        }
-
-        $output['verification'] = [
-            'attempted' => $report->verificationAttempted,
-            'verified' => $report->verifiedCount,
-            'downgraded' => $report->downgradedCount,
-            'input_tokens' => $report->verificationInputTokens,
-            'output_tokens' => $report->verificationOutputTokens,
-        ];
-
-        $this->line((string) json_encode($output, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-
-        return $report->hasCritical() ? self::FAILURE : self::SUCCESS;
+        // Invalid UTF-8 in AI-quoted source used to make json_encode() return
+        // false, which printed an EMPTY line and exited 0 — CI saw no findings.
+        $this->writeRaw(json_encode(
+            $output,
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR,
+        ));
     }
 
     /**
      * Save scan results to a JSON file.
+     *
+     * The full report array is saved — coverage, usage, verification counts,
+     * fingerprints and every finding field — so hack:report can regenerate
+     * exactly what this scan showed.
      */
     private function saveResults(VulnerabilityReport $report, int $elapsedMs): void
     {
@@ -788,152 +1109,74 @@ final class HackScanCommand extends Command
             $data['ai_model'] = config('hack-auditor.ai.model');
             $data['laravel_version'] = app()->version();
 
-            if ($report->hasUsageData()) {
-                $data['usage'] = $report->getUsageTracker()->toArray();
-                $data['files_skipped'] = $report->getFilesSkipped();
-            }
-
             $id = $history->save($data);
 
-            $this->components->info("Scan saved: <fg=cyan>{$id}</>");
+            if (! $this->isMachineOutput()) {
+                $this->components->info("Scan saved: <fg=cyan>{$id}</>");
+            }
         } catch (\Throwable $e) {
-            $this->components->error("Failed to save results: {$e->getMessage()}");
+            $this->errorOutput("Failed to save results: {$e->getMessage()}");
         }
     }
 
     /**
-     * Scan only files changed in the current git branch.
+     * The most recent saved scan, or null when there is none or it is unreadable.
+     *
+     * @return array<string, mixed>|null
      */
-    private function scanDiff(HackScanner $scanner): VulnerabilityReport
+    private function latestSavedScan(): ?array
     {
-        $collector = new GitDiffCollector;
-        $baseBranch = $this->option('base');
+        try {
+            return (new ScanHistory)->latest();
+        } catch (\Throwable) {
+            return null;
+        }
+    }
 
-        if (! is_string($baseBranch) || $baseBranch === '') {
-            /** @var ?string $configBranch */
-            $configBranch = config('hack-auditor.scan.diff_base_branch');
-            $baseBranch = is_string($configBranch) && $configBranch !== '' ? $configBranch : 'main';
+    /**
+     * Print an error without corrupting a machine-readable stdout document.
+     */
+    private function errorOutput(string $message): void
+    {
+        if ($this->isMachineOutput() && $this->output->getOutput() instanceof ConsoleOutputInterface) {
+            $this->output->getOutput()->getErrorOutput()->writeln('<error>'.ConsoleText::clean($message).'</error>');
+
+            return;
         }
 
-        $files = $collector->getChangedFiles($baseBranch);
-
-        if ($files === []) {
-            $report = new VulnerabilityReport(
-                vulnerabilities: [],
-                overallScore: 100,
-                summary: "No changed PHP files found compared to {$baseBranch}.",
-                ctfIdea: '',
-            );
-            $report->setCoverage(ScanCoverage::none());
-
-            return $report;
+        if (! $this->isMachineOutput()) {
+            $this->components->error(ConsoleText::clean($message));
         }
-
-        // Use scanFile for each changed file so it goes through the full
-        // HackScanner pipeline (route context, routed methods, form requests,
-        // model context) instead of bypassing it with raw PromptBuilder calls.
-        $reports = [];
-        $filesAnalyzed = 0;
-        $skipped = [];
-
-        foreach ($files as $filePath) {
-            try {
-                $fileReport = $scanner->scanFile($filePath);
-                $reports[] = $fileReport;
-
-                $fileCoverage = $fileReport->getCoverage();
-
-                if ($fileCoverage === null) {
-                    $filesAnalyzed++;
-
-                    continue;
-                }
-
-                $filesAnalyzed += $fileCoverage->filesAnalyzed;
-                $skipped = array_merge($skipped, $fileCoverage->skipped);
-            } catch (\Throwable $e) {
-                $skipped[] = ['path' => $filePath, 'reason' => ScanCoverage::REASON_AI_FAILURE];
-
-                Log::warning('[HackAuditor] Skipping diff file due to scan failure', [
-                    'file' => $filePath,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
-
-        $coverage = new ScanCoverage(
-            filesDiscovered: count($files),
-            filesAnalyzed: $filesAnalyzed,
-            skipped: $skipped,
-        );
-
-        if (count($reports) === 0) {
-            $report = new VulnerabilityReport(
-                vulnerabilities: [],
-                overallScore: 100,
-                summary: 'No files analyzed.',
-                ctfIdea: '',
-            );
-            $report->setCoverage($coverage);
-
-            return $report;
-        }
-
-        // Merge reports
-        $allVulns = [];
-        $scoreSum = 0;
-        $summaries = [];
-
-        foreach ($reports as $r) {
-            $allVulns = array_merge($allVulns, $r->vulnerabilities);
-            $scoreSum += $r->overallScore;
-
-            if ($r->summary !== '') {
-                $summaries[] = $r->summary;
-            }
-        }
-
-        $merged = new VulnerabilityReport(
-            vulnerabilities: $allVulns,
-            overallScore: (int) round($scoreSum / count($reports)),
-            summary: implode("\n\n", $summaries),
-            ctfIdea: '',
-        );
-
-        $tracker = $reports[0]->getUsageTracker();
-
-        if ($tracker !== null) {
-            $merged->setUsageTracker($tracker);
-        }
-
-        $merged->setCoverage($coverage);
-
-        return $merged;
     }
 
     /**
      * Apply baseline filtering to suppress known findings.
      *
+     * Findings are matched by the fingerprint the full report assigned them
+     * (see Baseline), so filtering a subset cannot renumber duplicates.
+     *
      * @param  array<int, Vulnerability>  $vulnerabilities
      * @return array<int, Vulnerability>
      */
-    private function applyBaseline(array $vulnerabilities): array
+    private function applyBaseline(array $vulnerabilities, VulnerabilityReport $report): array
     {
+        $this->baselineSuppressed = 0;
+
         if ($this->option('no-baseline')) {
             return $vulnerabilities;
         }
 
         $baseline = new Baseline;
-        $baselinePath = config('hack-auditor.scan.baseline_path');
 
-        if (! $baseline->exists(is_string($baselinePath) ? $baselinePath : null)) {
+        if (! $baseline->exists()) {
             return $vulnerabilities;
         }
 
-        $baseline->load(is_string($baselinePath) ? $baselinePath : null);
-        $result = $baseline->filter($vulnerabilities);
+        $baseline->load();
+        $result = $baseline->filter($vulnerabilities, $report);
+        $this->baselineSuppressed = $result['suppressed'];
 
-        if ($result['suppressed'] > 0 && ! $this->option('json')) {
+        if ($result['suppressed'] > 0 && ! $this->isMachineOutput()) {
             $newCount = count($result['new']);
             $this->components->info(
                 "<fg=gray>{$result['suppressed']} findings suppressed by baseline</> ({$newCount} new findings)"
@@ -949,10 +1192,11 @@ final class HackScanCommand extends Command
     private function updateBaseline(VulnerabilityReport $report): void
     {
         $baseline = new Baseline;
-        $baselinePath = config('hack-auditor.scan.baseline_path');
-        $baseline->save($report, is_string($baselinePath) ? $baselinePath : null);
+        $baseline->save($report);
 
-        $this->components->info("Baseline updated with {$report->allFindingsCount()} findings");
+        if (! $this->isMachineOutput()) {
+            $this->components->info("Baseline updated with {$report->allFindingsCount()} findings");
+        }
     }
 
     /**
@@ -966,8 +1210,8 @@ final class HackScanCommand extends Command
 
             $html = $generator->generate($report, [
                 'duration' => round($elapsedMs / 1000, 1).'s',
-                'provider' => config('hack-auditor.ai.provider', 'default'),
-                'model' => config('hack-auditor.ai.model', 'default'),
+                'provider' => (string) config('hack-auditor.ai.provider', 'default'),
+                'model' => (string) config('hack-auditor.ai.model', 'default'),
             ]);
 
             /** @var string $outputBase */
@@ -983,41 +1227,55 @@ final class HackScanCommand extends Command
 
             file_put_contents($fullPath, $html);
 
-            $this->components->info("HTML report saved to <fg=cyan>{$fullPath}</>");
+            if (! $this->isMachineOutput()) {
+                $this->components->info("HTML report saved to <fg=cyan>{$fullPath}</>");
+            }
         } catch (\Throwable $e) {
-            $this->components->error("Failed to generate HTML report: {$e->getMessage()}");
+            $this->errorOutput("Failed to generate HTML report: {$e->getMessage()}");
         }
     }
 
     /**
-     * Display scan comparison with previous scan if saved scans exist.
+     * Display the change since the previous saved scan.
+     *
+     * $previousScan is read before this run is saved; reading it afterwards
+     * compared the scan with itself. Findings are matched by fingerprint, so
+     * the new/resolved counts survive AI rewording and code moving around.
+     *
+     * @param  array<string, mixed>|null  $previousScan
      */
-    private function displayScanComparison(VulnerabilityReport $report): void
+    private function displayScanComparison(VulnerabilityReport $report, ?array $previousScan): void
     {
+        if ($previousScan === null) {
+            return;
+        }
+
         try {
-            $history = new ScanHistory;
-            $previous = $history->latest();
+            $previous = VulnerabilityReport::fromArray($previousScan);
+            $comparison = $report->compareWith($previous);
+        } catch (\Throwable) {
+            // History comparison is best-effort
+            return;
+        }
 
-            if ($previous === null) {
-                return;
-            }
+        $this->newLine();
 
-            // A suppressed score on either side makes the delta meaningless —
-            // comparing "no score" against a number invents a trend.
-            if (! $report->scoreIsMeaningful() || ! isset($previous['overall_score'])) {
-                return;
-            }
-
-            $previousScore = (int) $previous['overall_score'];
-            $delta = $report->overallScore - $previousScore;
+        // A suppressed score on either side makes the delta meaningless —
+        // comparing "no score" against a number invents a trend.
+        if ($comparison['score_delta'] !== null) {
+            $delta = $comparison['score_delta'];
             $deltaSign = $delta > 0 ? '+' : '';
             $deltaColor = $delta > 0 ? 'green' : ($delta < 0 ? 'red' : 'gray');
 
-            $this->newLine();
             $this->line("  <fg={$deltaColor}>Score: {$report->overallScore}/100 ({$deltaSign}{$delta} since last scan)</>");
-        } catch (\Throwable) {
-            // History comparison is best-effort
         }
+
+        $this->line(sprintf(
+            '  <fg=gray>Since last scan:</> %d new, %d resolved, %d unchanged confirmed finding(s)',
+            count($comparison['new_findings']),
+            count($comparison['resolved_findings']),
+            count($comparison['unchanged_findings']),
+        ));
     }
 
     /**
@@ -1198,14 +1456,18 @@ final class HackScanCommand extends Command
      */
     private function displayAnalyzedPaths(): void
     {
+        $pathOption = $this->option('path');
+
         /** @var array<int, string> $paths */
-        $paths = config('hack-auditor.scan.paths', []);
+        $paths = is_string($pathOption) && $pathOption !== ''
+            ? [$pathOption]
+            : config('hack-auditor.scan.paths', []);
 
         if ($paths === []) {
             return;
         }
 
-        $this->line('  <fg=gray>analyzed</>  '.implode(', ', $paths));
+        $this->line('  <fg=gray>analyzed</>  '.ConsoleText::clean(implode(', ', $paths)));
         $this->newLine();
     }
 

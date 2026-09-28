@@ -3,8 +3,10 @@
 declare(strict_types=1);
 
 use Mahdi\HackAuditor\Report\HtmlReportGenerator;
+use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
+use Mahdi\HackAuditor\Support\Confidence;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
 
@@ -214,4 +216,91 @@ it('html-escapes a vulnerability description containing a script tag', function 
 
     expect($html)->toContain('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;')
         ->and($html)->not->toContain('<script>alert("xss")</script>');
+});
+
+// Regression: ring geometry, placeholder re-expansion, invalid UTF-8, coverage
+
+it('uses the circumference of the stub ring radius (r=80) for the score ring', function (): void {
+    $report = new VulnerabilityReport([], 60, '', '');
+    $report->setCoverage(ScanCoverage::complete(1));
+
+    $html = (new HtmlReportGenerator)->generate($report);
+    $circumference = number_format(2 * M_PI * 80, 3, '.', '');
+    $expectedOffset = number_format(2 * M_PI * 80 * 0.4, 3, '.', '');
+
+    expect($html)->toContain('r="80"')
+        ->toContain("stroke-dasharray: {$circumference};")
+        ->toContain("stroke-dashoffset: {$expectedOffset};")
+        ->not->toContain('{{RING_CIRCUMFERENCE}}');
+});
+
+it('renders an empty ring when the score is withheld', function (): void {
+    $report = new VulnerabilityReport([], 100, '', '');
+    $report->setCoverage(ScanCoverage::none());
+
+    $html = (new HtmlReportGenerator)->generate($report);
+    $circumference = number_format(2 * M_PI * 80, 3, '.', '');
+
+    preg_match_all('/stroke-dashoffset: ([0-9.]+);/', $html, $offsets);
+
+    expect(array_unique($offsets[1]))->toBe([$circumference])
+        ->and($html)->toContain('var scoreMeaningful = false;');
+});
+
+it('does not re-expand placeholders that appear inside finding text', function (): void {
+    $report = new VulnerabilityReport([
+        makeReportVulnerability(description: 'desc {{USAGE_SECTION}} {{FINDINGS}} {{SCORE}}'),
+    ], 60, 'summary {{FINDINGS}}', '');
+
+    $html = (new HtmlReportGenerator)->generate($report);
+
+    expect(substr_count($html, 'Confirmed vulnerabilities (1)'))->toBe(1)
+        ->and($html)->toContain('desc {{USAGE_SECTION}} {{FINDINGS}} {{SCORE}}')
+        ->toContain('summary {{FINDINGS}}');
+});
+
+it('keeps finding text containing invalid UTF-8 instead of blanking it', function (): void {
+    $report = new VulnerabilityReport([
+        makeReportVulnerability(proof: "caf\xE9 unserialize(\$_GET['d'])"),
+    ], 60, '', '');
+
+    expect((new HtmlReportGenerator)->generate($report))->toContain('unserialize(');
+});
+
+it('shows Files Analyzed from coverage, not the number of files with findings', function (): void {
+    $report = new VulnerabilityReport([], 100, '', '');
+    $report->setCoverage(ScanCoverage::complete(40));
+
+    $html = (new HtmlReportGenerator)->generate($report);
+
+    expect($html)->toMatch('/Files Analyzed<\/div>\s*<div class="meta-value">40</');
+});
+
+it('shows confidence, CWE, references and the taint trace on confirmed cards', function (): void {
+    $vulnerability = new Vulnerability(
+        type: VulnerabilityType::SqlInjection,
+        location: 'app/A.php',
+        line: 3,
+        severity: SeverityLevel::High,
+        description: 'd',
+        proof: 'p',
+        fix: 'f',
+        taintTrace: '$request->input("q") <script> -> DB::select',
+        confidence: Confidence::Proven,
+    );
+
+    $html = (new HtmlReportGenerator)->generate(new VulnerabilityReport([$vulnerability], 80, '', ''));
+
+    expect($html)->toContain('confidence: proven')
+        ->toContain('>CWE-89<')
+        ->toContain('Taint Trace')
+        ->toContain('$request-&gt;input(&quot;q&quot;) &lt;script&gt;')
+        ->toContain('href="https://cwe.mitre.org/data/definitions/89.html"');
+});
+
+it('copies only confirmed findings for AI and never prints n/a/100', function (): void {
+    $html = (new HtmlReportGenerator)->generate(new VulnerabilityReport([], 100, '', ''));
+
+    expect($html)->toContain("querySelectorAll('.finding-card:not(.review-card)')")
+        ->not->toContain("'Score: ' + score + '/100 — ' + findings.length + ' issues found");
 });

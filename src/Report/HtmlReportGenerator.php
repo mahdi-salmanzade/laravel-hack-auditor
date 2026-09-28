@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\File;
 use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
+use Mahdi\HackAuditor\Support\References;
 
 class HtmlReportGenerator
 {
@@ -24,12 +25,26 @@ class HtmlReportGenerator
     ];
 
     /**
-     * Circumference of the SVG score ring (2 * PI * 54).
+     * Radius of the score ring's <circle> elements in report.stub.
+     *
+     * Must match the stub. The circumference used to be hard-coded for r=54
+     * while the stub drew r=80, so every score rendered as a ring roughly a
+     * third fuller than it should be — and a withheld score drew a partial
+     * ring instead of an empty one.
      */
-    private const float RING_CIRCUMFERENCE = 339.292;
+    private const float RING_RADIUS = 80.0;
+
+    /**
+     * Circumference of the SVG score ring (2 * PI * r).
+     */
+    private const float RING_CIRCUMFERENCE = 2 * M_PI * self::RING_RADIUS;
 
     /**
      * Generate a self-contained HTML security report from a VulnerabilityReport.
+     *
+     * "Files Analyzed" comes from the coverage record — the number of files the
+     * analyzer actually read. It used to fall back to the number of distinct
+     * files WITH FINDINGS, so a clean 40-file scan reported "0 files analyzed".
      *
      * @param  array{scanned_at?: string, duration?: string, paths_scanned?: array<int, string>, provider?: string, model?: string, total_files?: int}  $meta
      */
@@ -37,7 +52,7 @@ class HtmlReportGenerator
     {
         $scannedAt = $meta['scanned_at'] ?? now()->format('Y-m-d H:i:s');
         $duration = $meta['duration'] ?? 'N/A';
-        $totalFiles = $meta['total_files'] ?? $this->countUniqueFiles($report);
+        $totalFiles = $meta['total_files'] ?? $report->getCoverage()?->filesAnalyzed;
         $provider = $this->resolveProvider($meta);
 
         $scoreIsMeaningful = $report->scoreIsMeaningful();
@@ -63,6 +78,8 @@ class HtmlReportGenerator
             '{{SCORE}}' => $scoreLabel,
             '{{SCORE_COLOR}}' => $scoreColor,
             '{{STROKE_OFFSET}}' => number_format($strokeOffset, 3, '.', ''),
+            '{{RING_CIRCUMFERENCE}}' => number_format(self::RING_CIRCUMFERENCE, 3, '.', ''),
+            '{{SCORE_MEANINGFUL}}' => $scoreIsMeaningful ? 'true' : 'false',
             '{{CRITICAL_COUNT}}' => (string) $report->criticalCount(),
             '{{HIGH_COUNT}}' => (string) $report->highCount(),
             '{{MEDIUM_COUNT}}' => (string) $report->mediumCount(),
@@ -71,18 +88,19 @@ class HtmlReportGenerator
             '{{REVIEW_COUNT}}' => (string) $report->reviewCount(),
             '{{SCANNED_AT}}' => $this->escape($scannedAt),
             '{{DURATION}}' => $this->escape($duration),
-            '{{TOTAL_FILES}}' => (string) $totalFiles,
+            '{{TOTAL_FILES}}' => $totalFiles === null ? 'n/a' : (string) $totalFiles,
             '{{PROVIDER}}' => $this->escape($provider),
             '{{SUMMARY}}' => $this->buildCoverageHtml($report).$this->buildSummaryHtml($report->summary),
             '{{FINDINGS}}' => $findingsHtml,
             '{{USAGE_SECTION}}' => $usageHtml,
         ];
 
-        return str_replace(
-            array_keys($replacements),
-            array_values($replacements),
-            $stub,
-        );
+        // strtr, not str_replace with arrays: str_replace applies each pair in
+        // turn over the WHOLE string, so a finding description containing
+        // "{{USAGE_SECTION}}" (inserted by {{FINDINGS}}) was itself expanded
+        // by a later pair. strtr makes a single pass and never re-scans
+        // replaced text.
+        return strtr($stub, $replacements);
     }
 
     /**
@@ -115,6 +133,12 @@ class HtmlReportGenerator
      */
     private function buildCoverageHtml(VulnerabilityReport $report): string
     {
+        $targetError = $report->getTargetError();
+
+        if ($targetError !== null) {
+            return '<p><strong>Scan target could not be analysed — '.$this->escape($targetError).'</strong></p>';
+        }
+
         $coverage = $report->getCoverage();
 
         if ($coverage === null || $coverage->isComplete()) {
@@ -179,18 +203,21 @@ class HtmlReportGenerator
      */
     private function buildUsageHtml(VulnerabilityReport $report): string
     {
-        if (! $report->hasUsageData()) {
+        $usage = $report->usageSnapshot();
+
+        if ($usage === null) {
             return '';
         }
 
-        $tracker = $report->getUsageTracker();
-        $promptTokens = number_format($tracker->getPromptTokens());
-        $completionTokens = number_format($tracker->getCompletionTokens());
-        $totalTokens = number_format($tracker->totalTokens());
-        $requests = (string) $tracker->getRequests();
-        $cost = sprintf('$%.4f', $tracker->estimateCost());
-        $duration = sprintf('%.1fs', $tracker->getElapsedSeconds());
+        // Read from the snapshot rather than the live tracker so a report
+        // regenerated from a saved scan (no tracker) still shows its spend.
+        $promptTokens = number_format($this->intFrom($usage, 'prompt_tokens'));
+        $completionTokens = number_format($this->intFrom($usage, 'completion_tokens'));
+        $totalTokens = number_format($this->intFrom($usage, 'total_tokens'));
+        $requests = (string) $this->intFrom($usage, 'requests');
+        $cost = sprintf('$%.4f', is_numeric($usage['estimated_cost_usd'] ?? null) ? (float) $usage['estimated_cost_usd'] : 0.0);
         $filesSkipped = $report->getFilesSkipped();
+        $tokenLimit = $this->intFrom($usage, 'token_limit');
 
         $cards = <<<HTML
             <div class="meta-card">
@@ -211,9 +238,9 @@ class HtmlReportGenerator
             </div>
         HTML;
 
-        if ($tracker->isLimitSet()) {
-            $limit = number_format($tracker->getTokenLimit());
-            $percent = sprintf('%.1f%%', $tracker->getUsagePercent());
+        if ($tokenLimit > 0) {
+            $limit = number_format($tokenLimit);
+            $percent = sprintf('%.1f%%', is_numeric($usage['usage_percent'] ?? null) ? (float) $usage['usage_percent'] : 0.0);
             $cards .= <<<HTML
 
                 <div class="meta-card">
@@ -417,9 +444,14 @@ class HtmlReportGenerator
         $shortOwasp = $this->escape($this->truncateOwasp($vulnerability->type->owaspCategory()));
         $description = $this->escape($vulnerability->description);
         $proof = $this->escape($vulnerability->proof);
+        $confidence = $this->escape($vulnerability->confidence->value);
+        $confidenceTitle = $this->escape($vulnerability->confidence->explanation());
+        $cwe = $this->escape($vulnerability->type->cweId());
         $verificationBadge = $this->buildVerificationBadge($vulnerability);
         $exploitBlock = $this->buildExploitBlock($vulnerability);
+        $taintBlock = $this->buildTaintTraceBlock($vulnerability);
         $fixBlock = $this->buildFixBlock($vulnerability);
+        $referencesBlock = $this->buildReferencesBlock($vulnerability);
 
         return <<<HTML
         <div class="finding-card severity-{$severityValue}" data-expanded="false">
@@ -433,6 +465,8 @@ class HtmlReportGenerator
             <div class="finding-row-bottom">
               <span class="finding-location">{$location}:{$line}</span>
               <span class="owasp-tag" title="{$fullOwasp}">{$shortOwasp}</span>
+              <span class="owasp-tag cwe-tag" title="Common Weakness Enumeration">{$cwe}</span>
+              <span class="owasp-tag confidence-tag" title="{$confidenceTitle}">confidence: {$confidence}</span>
             </div>
           </div>
           <div class="finding-body">
@@ -442,7 +476,9 @@ class HtmlReportGenerator
               <div class="code-label vulnerable-label">Vulnerable Code</div>
               <div class="code-block vulnerable-code"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$proof}</code></pre></div>
             </div>
+            {$taintBlock}
             {$fixBlock}
+            {$referencesBlock}
           </div>
         </div>
         HTML;
@@ -519,6 +555,57 @@ class HtmlReportGenerator
     }
 
     /**
+     * Render the source-to-sink taint trace, when the detector recorded one.
+     *
+     * The trace is the evidence chain behind a "proven" finding; without it a
+     * reader has to take the confidence label on trust.
+     */
+    private function buildTaintTraceBlock(Vulnerability $vulnerability): string
+    {
+        if ($vulnerability->taintTrace === null || trim($vulnerability->taintTrace) === '') {
+            return '';
+        }
+
+        $trace = $this->escape($vulnerability->taintTrace);
+
+        return <<<HTML
+        <div class="code-section">
+          <div class="code-label">Taint Trace (source → sink)</div>
+          <div class="code-block"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code>{$trace}</code></pre></div>
+        </div>
+        HTML;
+    }
+
+    /**
+     * Render links to the CWE entry and OWASP cheat sheet for the finding type.
+     */
+    private function buildReferencesBlock(Vulnerability $vulnerability): string
+    {
+        $links = array_map(
+            fn (array $reference): string => '<a href="'.$this->escape($reference['url']).'" target="_blank" rel="noopener noreferrer">'
+                .$this->escape($reference['title']).'</a>',
+            References::for($vulnerability->type),
+        );
+
+        if ($links === []) {
+            return '';
+        }
+
+        return '<p class="finding-description finding-references" style="font-size:12px;opacity:0.85">References: '
+            .implode(' · ', $links).'</p>';
+    }
+
+    /**
+     * Read an integer field from a usage snapshot.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function intFrom(array $data, string $key): int
+    {
+        return is_numeric($data[$key] ?? null) ? (int) $data[$key] : 0;
+    }
+
+    /**
      * Truncate an OWASP category string to just the code (e.g. "A07:2021").
      */
     private function truncateOwasp(string $owasp): string
@@ -550,21 +637,6 @@ class HtmlReportGenerator
     }
 
     /**
-     * Count unique file locations across all vulnerabilities in the report.
-     */
-    private function countUniqueFiles(VulnerabilityReport $report): int
-    {
-        $files = array_unique(
-            array_map(
-                fn (Vulnerability $v): string => $v->location,
-                $report->vulnerabilities,
-            ),
-        );
-
-        return count($files);
-    }
-
-    /**
      * Return the absolute path to the report HTML stub.
      */
     private function stubPath(): string
@@ -574,9 +646,13 @@ class HtmlReportGenerator
 
     /**
      * HTML-escape a string for safe embedding in HTML output.
+     *
+     * ENT_SUBSTITUTE matters: without it htmlspecialchars() returns an EMPTY
+     * string for input containing invalid UTF-8, so a proof quoting a Latin-1
+     * source comment silently vanished from the report.
      */
     private function escape(string $value): string
     {
-        return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+        return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
 }

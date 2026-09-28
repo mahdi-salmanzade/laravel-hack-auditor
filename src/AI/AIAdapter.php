@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\AI;
 
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Log;
+use Laravel\Ai\Exceptions\InsufficientCreditsException;
+use Laravel\Ai\Exceptions\RateLimitedException;
 use Mahdi\HackAuditor\Support\AiProviders;
 use RuntimeException;
 
@@ -72,40 +75,12 @@ class AIAdapter
     /**
      * Send a prompt to the AI provider and return the text response.
      *
-     * Implements retry logic with exponential backoff (1s, 2s, 4s) for up to
-     * 3 attempts. Logs request/response details when app.debug is enabled.
-     *
-     * @throws RuntimeException When all retry attempts are exhausted.
+     * @throws RuntimeException When all retry attempts are exhausted, or on the
+     *                          first non-retryable error.
      */
     public function send(string $systemPrompt, string $userPrompt): string
     {
-        $lastException = null;
-
-        for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
-            try {
-                $this->logRequest($systemPrompt, $userPrompt, $attempt);
-
-                $response = $this->executeRequest($systemPrompt, $userPrompt);
-
-                $this->logResponse($response, $attempt);
-
-                return $response;
-            } catch (\Throwable $e) {
-                $lastException = $e;
-
-                $this->logRetry($attempt, $e);
-
-                if ($attempt < self::MAX_RETRIES) {
-                    $delaySeconds = $this->calculateBackoff($attempt, $e);
-                    sleep($delaySeconds);
-                }
-            }
-        }
-
-        throw new RuntimeException(
-            'AI request failed after '.self::MAX_RETRIES." attempts: {$lastException?->getMessage()}",
-            previous: $lastException,
-        );
+        return $this->sendWithUsage($systemPrompt, $userPrompt)['text'];
     }
 
     /**
@@ -121,12 +96,16 @@ class AIAdapter
     /**
      * Send a prompt and return both the response text and token usage.
      *
-     * Same retry logic as send(), but also extracts prompt_tokens and
-     * completion_tokens from the AI response's usage object.
+     * Transient failures (rate limits, overloaded or unreachable providers,
+     * 5xx) are retried with backoff. Errors that no retry can fix — a rejected
+     * API key, an unknown model, a malformed request, exhausted credits — fail
+     * on the first attempt: retrying them used to burn 30 seconds per chunk
+     * before reporting the same error.
      *
      * @return array{text: string, usage: array{prompt_tokens: int, completion_tokens: int}}
      *
-     * @throws RuntimeException When all retry attempts are exhausted.
+     * @throws RuntimeException When all retry attempts are exhausted, or on the
+     *                          first non-retryable error.
      */
     public function sendWithUsage(string $systemPrompt, string $userPrompt): array
     {
@@ -136,9 +115,7 @@ class AIAdapter
             try {
                 $this->logRequest($systemPrompt, $userPrompt, $attempt);
 
-                $agent = $this->buildAgent($systemPrompt);
-
-                $response = $agent->prompt(
+                $response = $this->buildAgent($systemPrompt)->prompt(
                     prompt: $userPrompt,
                     provider: $this->provider,
                     model: $this->model,
@@ -148,57 +125,89 @@ class AIAdapter
                 $text = $response->text;
                 $this->logResponse($text, $attempt);
 
-                $promptTokens = 0;
-                $completionTokens = 0;
-
-                if (isset($response->usage)) {
-                    $promptTokens = $response->usage->promptTokens ?? 0;
-                    $completionTokens = $response->usage->completionTokens ?? 0;
-                }
-
                 return [
                     'text' => $text,
-                    'usage' => [
-                        'prompt_tokens' => $promptTokens,
-                        'completion_tokens' => $completionTokens,
-                    ],
+                    'usage' => self::extractUsage($response->usage ?? null),
                 ];
             } catch (\Throwable $e) {
                 $lastException = $e;
+
+                if (! self::isRetryable($e)) {
+                    $this->logRetry(self::MAX_RETRIES, $e);
+
+                    throw new RuntimeException(
+                        "AI request failed with a non-retryable error: {$e->getMessage()}",
+                        previous: $e,
+                    );
+                }
+
                 $this->logRetry($attempt, $e);
 
                 if ($attempt < self::MAX_RETRIES) {
-                    $delaySeconds = $this->calculateBackoff($attempt, $e);
-                    sleep($delaySeconds);
+                    sleep($this->calculateBackoff($attempt, $e));
                 }
             }
         }
 
         throw new RuntimeException(
-            'AI request failed after '.self::MAX_RETRIES." attempts: {$lastException?->getMessage()}",
+            'AI request failed after '.self::MAX_RETRIES." attempts: {$lastException->getMessage()}",
             previous: $lastException,
         );
     }
 
     /**
-     * Execute the AI request using the laravel/ai SDK.
+     * Read token counts from a laravel/ai usage object, whichever SDK major produced it.
      *
-     * Uses a ScannerAgent with the Promptable trait to send the system prompt
-     * as agent instructions and the user prompt as the prompt message.
-     * The response text is extracted from the AgentResponse.
+     * laravel/ai 0.x names them promptTokens/completionTokens; 1.x renamed them
+     * to inputTokens/outputTokens. Reading only the old names silently recorded
+     * every 1.x scan as zero tokens and $0, which also disabled --limit.
+     *
+     * @return array{prompt_tokens: int, completion_tokens: int}
      */
-    private function executeRequest(string $systemPrompt, string $userPrompt): string
+    public static function extractUsage(?object $usage): array
     {
-        $agent = $this->buildAgent($systemPrompt);
+        if ($usage === null) {
+            return ['prompt_tokens' => 0, 'completion_tokens' => 0];
+        }
 
-        $response = $agent->prompt(
-            prompt: $userPrompt,
-            provider: $this->provider,
-            model: $this->model,
-            timeout: $this->timeout,
-        );
+        $read = static function (object $usage, string ...$properties): int {
+            foreach ($properties as $property) {
+                if (isset($usage->{$property}) && is_numeric($usage->{$property})) {
+                    return (int) $usage->{$property};
+                }
+            }
 
-        return $response->text;
+            return 0;
+        };
+
+        return [
+            'prompt_tokens' => $read($usage, 'inputTokens', 'promptTokens'),
+            'completion_tokens' => $read($usage, 'outputTokens', 'completionTokens'),
+        ];
+    }
+
+    /**
+     * Whether retrying could plausibly change the outcome of a failed request.
+     *
+     * Walks the exception chain so a provider HTTP error is classified by its
+     * status code whichever wrapper laravel/ai put around it. Anything without
+     * a status (timeouts, connection resets, unexpected SDK errors) is retried.
+     */
+    public static function isRetryable(\Throwable $exception): bool
+    {
+        for ($current = $exception; $current !== null; $current = $current->getPrevious()) {
+            if ($current instanceof InsufficientCreditsException) {
+                return false;
+            }
+
+            if ($current instanceof RequestException) {
+                $status = $current->response->status();
+
+                return $status === 408 || $status === 409 || $status === 429 || $status >= 500;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -265,7 +274,8 @@ class AIAdapter
     {
         $message = strtolower($exception->getMessage());
 
-        $isRateLimit = str_contains($message, 'rate limit')
+        $isRateLimit = $exception instanceof RateLimitedException
+            || str_contains($message, 'rate limit')
             || str_contains($message, 'rate_limit')
             || str_contains($message, 'too many requests')
             || str_contains($message, '429');

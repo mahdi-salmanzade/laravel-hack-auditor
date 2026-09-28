@@ -5,11 +5,25 @@ declare(strict_types=1);
 namespace Mahdi\HackAuditor\Console;
 
 use Illuminate\Console\Command;
+use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
+use Mahdi\HackAuditor\Support\Confidence;
+use Mahdi\HackAuditor\Support\FindingClass;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
 
+/**
+ * A zero-config preview of hack:scan output.
+ *
+ * The findings are PRE-RECORDED: no AI request is made and nothing is
+ * analysed live. Everything the command prints says so, and everything else
+ * about the output is kept faithful to a real scan — the score comes from the
+ * real formula over these findings, confirmed vulnerabilities and review
+ * questions are split exactly as hack:scan splits them, and coverage and
+ * confidence are shown the same way. A demo that looks better than the product
+ * is an advert, not a demo.
+ */
 final class HackDemoCommand extends Command
 {
     /**
@@ -17,16 +31,23 @@ final class HackDemoCommand extends Command
      *
      * @var string
      */
-    protected $signature = 'hack:demo {--quick : Skip animations}';
+    protected $signature = 'hack:demo
+        {--quick : Skip animations}
+        {--copy : Copy the share text to the clipboard}';
 
     /**
      * The console command description.
      *
      * @var string
      */
-    protected $description = 'Run a dramatic demo scan on a purposely vulnerable controller (no API key needed)';
+    protected $description = 'Preview scan output on a purposely vulnerable controller (pre-recorded findings, no AI call, no API key needed)';
 
     private const string DEMO_CONTROLLER_FILENAME = 'InsecureController.php';
+
+    /**
+     * Number of flaws planted in the demo controller stub.
+     */
+    private const int PLANTED_FLAWS = 12;
 
     /**
      * Execute the console command.
@@ -66,25 +87,27 @@ final class HackDemoCommand extends Command
         $this->clearScreen();
         $this->displayBanner();
 
-        $this->line('');
-        $this->line('  <fg=gray>target</>   InsecureController.php (12 vuln types)');
-        $this->line('  <fg=gray>engine</>   local demo — no API key needed');
-        $this->line('');
-
-        $this->animateSteps();
-
         $report = $this->buildHardcodedReport($demoFile);
 
         $this->line('');
-        $this->displayScore($report->overallScore);
+        $this->line('  <fg=gray>target</>   InsecureController.php ('.self::PLANTED_FLAWS.' planted flaws)');
+        $this->line('  <fg=gray>engine</>   pre-recorded demo findings — no AI call, no API key needed');
+        $this->line('');
+
+        $this->animateSteps(count($report->confirmedVulnerabilities()), $report->reviewCount());
+
+        $this->line('');
+        $this->displayCoverage($report);
+        $this->displayScore($report);
         $this->line('');
         $this->displayVulnerabilityTable($report);
         $this->line('');
+        $this->displayReviewItems($report);
         $this->displayStats($report);
         $this->line('');
         $this->displayWarningBox();
         $this->line('');
-        $this->displaySharePrompt();
+        $this->displaySharePrompt($report);
     }
 
     /**
@@ -115,18 +138,20 @@ final class HackDemoCommand extends Command
     }
 
     /**
-     * Display the animated scanning steps unless --quick is set.
+     * Display the animated steps unless --quick is set.
+     *
+     * The steps describe what is actually happening — replaying recorded
+     * findings — rather than narrating an attack that is not taking place.
      */
-    private function animateSteps(): void
+    private function animateSteps(int $confirmedCount, int $reviewCount): void
     {
         /** @var array<int, array{message: string, color: string, delay: int}> $steps */
         $steps = [
             ['message' => 'Loading vulnerable controller...', 'color' => 'cyan', 'delay' => 600_000],
-            ['message' => 'Mapping attack surface...', 'color' => 'cyan', 'delay' => 800_000],
-            ['message' => 'Exploiting logic flaws...', 'color' => 'yellow', 'delay' => 1_200_000],
-            ['message' => 'Testing injection vectors...', 'color' => 'yellow', 'delay' => 1_000_000],
-            ['message' => 'Extracting credentials...', 'color' => 'red', 'delay' => 800_000],
-            ['message' => 'Full compromise achieved — 12 vulnerabilities', 'color' => 'red', 'delay' => 400_000],
+            ['message' => 'Replaying pre-recorded findings (no AI request is made)...', 'color' => 'cyan', 'delay' => 800_000],
+            ['message' => 'Separating confirmed vulnerabilities from review questions...', 'color' => 'yellow', 'delay' => 800_000],
+            ['message' => 'Scoring confirmed findings: max(0, 100 - sum of severity weights)...', 'color' => 'yellow', 'delay' => 600_000],
+            ['message' => "{$confirmedCount} confirmed vulnerabilities, {$reviewCount} item(s) for review", 'color' => 'red', 'delay' => 400_000],
         ];
 
         $quick = (bool) $this->option('quick');
@@ -142,7 +167,13 @@ final class HackDemoCommand extends Command
     }
 
     /**
-     * Build the hardcoded vulnerability report with 12 demo vulnerabilities.
+     * Build the pre-recorded report for the demo controller.
+     *
+     * Eleven confirmed vulnerabilities and one review question. The missing
+     * rate limit is a question, not a finding: throttling is applied on the
+     * ROUTE, and the routes are not part of this controller — exactly the kind
+     * of thing a real scan refuses to assert. The score is computed with the
+     * real formula over the confirmed findings, not typed in.
      */
     private function buildHardcodedReport(string $demoFile): VulnerabilityReport
     {
@@ -157,6 +188,7 @@ final class HackDemoCommand extends Command
                 description: 'Raw user input concatenated directly into SQL query via DB::select(). Attacker can extract entire database.',
                 proof: "curl -X POST /api/users -d 'id=1 OR 1=1; DROP TABLE users;--'",
                 fix: "Use parameterized queries: DB::select('SELECT * FROM users WHERE id = ?', [\$id]);",
+                confidence: Confidence::Proven,
             ),
             new Vulnerability(
                 type: VulnerabilityType::Xss,
@@ -193,6 +225,7 @@ final class HackDemoCommand extends Command
                 description: 'Passwords stored using md5() which is cryptographically broken. Rainbow table attack recovers passwords instantly.',
                 proof: 'echo md5("password123"); // 482c811da5d5b4bc6d497ffa98491e38 — found in rainbow tables',
                 fix: 'Use Hash::make($password) which uses bcrypt/argon2. Never use md5(), sha1(), or sha256() for passwords.',
+                confidence: Confidence::Proven,
             ),
             new Vulnerability(
                 type: VulnerabilityType::SensitiveDataExposure,
@@ -217,9 +250,11 @@ final class HackDemoCommand extends Command
                 location: $location,
                 line: 31,
                 severity: SeverityLevel::Medium,
-                description: 'Login endpoint has no rate limiting. Attacker can brute-force passwords at thousands of attempts per second.',
-                proof: 'for i in $(seq 1 10000); do curl -X POST /login -d "email=admin@app.com&password=attempt$i"; done',
-                fix: 'Add RateLimiter::for(\'login\', fn() => Limit::perMinute(5)) and apply throttle:login middleware.',
+                description: 'Is a throttle applied to the route for register()? Rate limiting is attached to routes, and the routes are not visible from this controller.',
+                proof: 'public function register(Request $request)',
+                fix: '',
+                findingClass: FindingClass::Review,
+                confidence: Confidence::Possible,
             ),
             new Vulnerability(
                 type: VulnerabilityType::InsecureDeserialization,
@@ -229,6 +264,7 @@ final class HackDemoCommand extends Command
                 description: 'unserialize() called on user-controlled cookie data. Enables Remote Code Execution via PHP gadget chains.',
                 proof: 'Cookie: preferences=O:8:"Shutdown":1:{s:4:"path";s:14:"/tmp/pwned.php";}',
                 fix: 'Use json_decode() instead of unserialize(). If serialization is needed, use signed/encrypted cookies.',
+                confidence: Confidence::Proven,
             ),
             new Vulnerability(
                 type: VulnerabilityType::AuthBypass,
@@ -259,32 +295,85 @@ final class HackDemoCommand extends Command
             ),
         ];
 
-        return new VulnerabilityReport(
+        $report = new VulnerabilityReport(
             vulnerabilities: $vulnerabilities,
-            overallScore: 8,
-            summary: 'This controller is critically insecure. It contains 12 exploitable vulnerabilities spanning all OWASP Top 10 categories. An attacker could achieve full database extraction, remote code execution, account takeover, and complete server compromise within minutes of deployment.',
+            overallScore: self::scoreFor($vulnerabilities),
+            summary: 'This controller is critically insecure: SQL injection, insecure deserialization, a header-based admin check and plaintext-equivalent password hashing would each allow a serious compromise on their own.',
             ctfIdea: 'Chain the SQL injection with the auth bypass to extract the admin password hash, then use the weak hashing to crack it and access the admin panel.',
         );
+
+        // One file, fully analysed — the same coverage record a real scan
+        // attaches, so the score is shown under the same rules.
+        $report->setCoverage(ScanCoverage::complete(1));
+
+        return $report;
     }
 
     /**
-     * Display the overall security score with dramatic formatting.
+     * The real scoring formula: max(0, 100 - sum of confirmed severity weights).
+     *
+     * @param  array<int, Vulnerability>  $findings
      */
-    private function displayScore(int $score): void
+    public static function scoreFor(array $findings): int
     {
-        $this->line('  <fg=red;options=bold>╔══════════════════════════════════════════════╗</>');
-        $this->line("  <fg=red;options=bold>║         SECURITY SCORE:  {$score}/100               ║</>");
-        $this->line('  <fg=red;options=bold>║    CRITICALLY INSECURE — FULL COMPROMISE     ║</>');
-        $this->line('  <fg=red;options=bold>╚══════════════════════════════════════════════╝</>');
+        $penalty = 0;
+
+        foreach ($findings as $finding) {
+            if ($finding->isConfirmedVulnerability()) {
+                $penalty += $finding->severity->weight();
+            }
+        }
+
+        return max(0, 100 - $penalty);
     }
 
     /**
-     * Display the top 6 vulnerabilities with "...and N more" for GIF brevity.
+     * Display the coverage line, as hack:scan does.
+     */
+    private function displayCoverage(VulnerabilityReport $report): void
+    {
+        $coverage = $report->getCoverage();
+
+        if ($coverage === null) {
+            return;
+        }
+
+        $this->line(sprintf(
+            '  <fg=gray>coverage</>  <fg=green>%d/%d files analyzed (%s%%)</> <fg=gray>(demo file only)</>',
+            $coverage->filesAnalyzed,
+            $coverage->filesDiscovered,
+            $coverage->percent(),
+        ));
+        $this->line('');
+    }
+
+    /**
+     * Display the score and the arithmetic that produced it.
+     */
+    private function displayScore(VulnerabilityReport $report): void
+    {
+        $score = $report->overallScore;
+        $terms = [];
+
+        foreach ($report->scoreBreakdown()['severities'] ?? [] as $entry) {
+            if ($entry['count'] > 0) {
+                $terms[] = "{$entry['count']}×{$entry['weight']} {$entry['severity']}";
+            }
+        }
+
+        $this->line('  <fg=red;options=bold>╔══════════════════════════════════════════════╗</>');
+        $this->line('  <fg=red;options=bold>║'.str_pad("SECURITY SCORE:  {$score}/100", 46, ' ', STR_PAD_BOTH).'║</>');
+        $this->line('  <fg=red;options=bold>║        CRITICALLY INSECURE (demo file)       ║</>');
+        $this->line('  <fg=red;options=bold>╚══════════════════════════════════════════════╝</>');
+        $this->line('  <fg=gray>score = max(0, 100 − '.implode(' − ', $terms).')</>');
+    }
+
+    /**
+     * Display the top 6 confirmed vulnerabilities with "...and N more".
      */
     private function displayVulnerabilityTable(VulnerabilityReport $report): void
     {
-        /** @var array<int, Vulnerability> $sorted */
-        $sorted = $report->vulnerabilities;
+        $sorted = $report->confirmedVulnerabilities();
 
         usort(
             $sorted,
@@ -294,6 +383,8 @@ final class HackDemoCommand extends Command
         $top = array_slice($sorted, 0, 6);
         $remaining = count($sorted) - 6;
 
+        $this->line('  <fg=red;options=bold>━━━ Confirmed vulnerabilities ('.count($sorted).') ━━━</>');
+
         $rows = [];
         foreach ($top as $index => $vuln) {
             $rows[] = [
@@ -301,11 +392,13 @@ final class HackDemoCommand extends Command
                 $vuln->severity->label(),
                 "<options=bold>{$vuln->type->label()}</>",
                 "<fg=cyan>:{$vuln->line}</>",
+                $vuln->confidence->label(),
+                $vuln->type->cweId(),
             ];
         }
 
         $this->table(
-            ['<options=bold>#</>', '<options=bold>Severity</>', '<options=bold>Type</>', '<options=bold>Line</>'],
+            ['<options=bold>#</>', '<options=bold>Severity</>', '<options=bold>Type</>', '<options=bold>Line</>', '<options=bold>Confidence</>', '<options=bold>CWE</>'],
             $rows,
         );
 
@@ -315,16 +408,35 @@ final class HackDemoCommand extends Command
     }
 
     /**
+     * Display the review questions separately, as hack:scan does.
+     */
+    private function displayReviewItems(VulnerabilityReport $report): void
+    {
+        $items = $report->reviewItems();
+
+        $this->line('  <fg=yellow;options=bold>━━━ Needs review ('.count($items).') ━━━</>');
+        $this->line('  <fg=gray>NOT vulnerabilities — excluded from the count, the score and the exit code. No fix is suggested.</>');
+
+        foreach ($items as $item) {
+            $this->line("  <fg=yellow>?</> <options=bold>{$item->type->label()}</> <fg=cyan>:{$item->line}</> <fg=gray>confidence: {$item->confidence->label()}</>");
+            $this->line("    <fg=gray>{$item->description}</>");
+        }
+
+        $this->line('');
+    }
+
+    /**
      * Display the vulnerability count statistics.
      */
     private function displayStats(VulnerabilityReport $report): void
     {
         $this->line(
-            "  Found <options=bold>{$report->totalCount()}</> vulnerabilities: "
+            "  Found <options=bold>{$report->totalCount()}</> confirmed vulnerabilities: "
             ."<fg=red>{$report->criticalCount()} Critical</>, "
             ."<fg=yellow>{$report->highCount()} High</>, "
             ."<fg=blue>{$report->mediumCount()} Medium</>, "
-            ."<fg=gray>{$report->lowCount()} Low</>",
+            ."<fg=gray>{$report->lowCount()} Low</>"
+            ." <fg=gray>(+{$report->reviewCount()} for review)</>",
         );
     }
 
@@ -333,25 +445,30 @@ final class HackDemoCommand extends Command
      */
     private function displayWarningBox(): void
     {
-        $this->line('  <fg=red;options=bold>Your app would be hacked in production within minutes.</>');
+        $this->line('  <fg=red;options=bold>Deployed as-is, this controller would be exploitable within minutes.</>');
+        $this->line('  <fg=gray>These were pre-recorded findings for a planted file. Your own results will differ.</>');
         $this->line('');
         $this->line('  Run <fg=cyan>php artisan hack:scan</> on YOUR code to find real vulnerabilities.');
     }
 
     /**
-     * Display the share tweet and auto-copy to clipboard.
+     * Display the share text. The clipboard is only touched with --copy.
+     *
+     * The text says what the demo is: pre-recorded findings on a planted
+     * file. It used to claim "Just watched AI hack my Laravel app" — no AI
+     * runs here, and it is not the user's app.
      */
-    private function displaySharePrompt(): void
+    private function displaySharePrompt(VulnerabilityReport $report): void
     {
-        $tweetText = "Just watched AI hack my Laravel app in 15 seconds.\n"
-            ."12 vulnerabilities. Score: 8/100.\n"
+        $tweetText = "Tried the laravel-hack-auditor demo: a deliberately vulnerable controller, pre-recorded findings.\n"
+            ."{$report->totalCount()} confirmed vulnerabilities + {$report->reviewCount()} flagged for review. Score: {$report->overallScore}/100.\n"
             ."\n"
             ."composer require mahdisphp/laravel-hack-auditor\n"
             ."php artisan hack:demo\n"
             ."\n"
             .'#Laravel #Security';
 
-        $this->line('  <fg=cyan;options=bold>Share your results:</>');
+        $this->line('  <fg=cyan;options=bold>Share text:</>');
         $this->line('');
 
         foreach (explode("\n", $tweetText) as $tweetLine) {
@@ -359,7 +476,12 @@ final class HackDemoCommand extends Command
         }
 
         $this->line('');
-        $this->copyToClipboard($tweetText);
+
+        if ($this->option('copy')) {
+            $this->copyToClipboard($tweetText);
+        } else {
+            $this->line('  <fg=gray>Run with --copy to copy this to your clipboard.</>');
+        }
     }
 
     /**
@@ -383,7 +505,11 @@ final class HackDemoCommand extends Command
             fwrite($process, $text);
             pclose($process);
             $this->line('  <fg=green>Copied to clipboard.</>');
+
+            return;
         }
+
+        $this->line('  <fg=yellow>No clipboard tool found (pbcopy, xclip or xsel).</>');
     }
 
     /**

@@ -18,7 +18,15 @@ class ScanHistory
     /**
      * Save a scan result. Returns the scan ID (ULID).
      *
+     * The JSON is encoded BEFORE anything touches disk. json_encode() used to
+     * return false on invalid UTF-8 (AI output quoting a Latin-1 source file),
+     * and false was written as an empty file — which then became the "latest"
+     * scan and broke every later comparison and report. Invalid bytes are now
+     * substituted, and any other encoding failure throws with nothing written.
+     *
      * @param  array<string, mixed>  $data
+     *
+     * @throws \JsonException When the data cannot be encoded.
      */
     public function save(array $data): string
     {
@@ -29,13 +37,14 @@ class ScanHistory
             'created_at' => now()->toIso8601String(),
         ]);
 
+        $json = json_encode(
+            $entry,
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR,
+        );
+
         $this->ensureDirectory();
 
-        file_put_contents(
-            $this->path($id),
-            json_encode($entry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES),
-            LOCK_EX,
-        );
+        file_put_contents($this->path($id), $json, LOCK_EX);
 
         return $id;
     }

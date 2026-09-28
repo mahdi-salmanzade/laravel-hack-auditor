@@ -673,7 +673,10 @@ final class SensitiveDataExposureDetector implements AccessControlDetector
     /**
      * Argument values of a serialising call, as payload expressions.
      *
-     * @param  array<int, Node\Arg|Node\VariadicPlaceholder>  $args
+     * Placeholders (`foo(...)`, and php-parser 5.9's `?` partial-application
+     * ArgPlaceholder) carry no value and are skipped.
+     *
+     * @param  array<int|string, Node\Arg|Node\ArgPlaceholder|Node\VariadicPlaceholder>  $args
      * @return array<int, array{expr: Node\Expr, sink: string}>
      */
     private function argumentPayloads(array $args, string $sink): array

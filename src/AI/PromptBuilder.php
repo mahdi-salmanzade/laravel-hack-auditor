@@ -6,6 +6,7 @@ namespace Mahdi\HackAuditor\AI;
 
 use Mahdi\HackAuditor\Scanner\AppContext;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
+use Mahdi\HackAuditor\Support\VulnerabilityType;
 
 class PromptBuilder
 {
@@ -31,7 +32,7 @@ class PromptBuilder
      */
     public function systemPrompt(): string
     {
-        return <<<'PROMPT'
+        return str_replace('{{VULNERABILITY_TYPES}}', $this->reportableTypeList(), <<<'PROMPT'
 You are a Laravel security auditor. You analyze PHP source code for security vulnerabilities.
 You MUST respond with ONLY a JSON object — no prose, no markdown fences, no explanation.
 
@@ -152,7 +153,7 @@ CRITICAL RULES — READ BEFORE ANALYZING:
    allowlist, $request->validated(), Eloquent parameterization), DELETE the finding.
 
    The CommandInjection sink is exec(), shell_exec(), system(), passthru(), or proc_open()
-   reached by unescaped user input. Use type "CommandInjection" for these — do NOT mislabel
+   reached by unescaped user input. Use type "command_injection" for these — do NOT mislabel
    OS command execution as InsecureDeserialization or MissingValidation.
 
    For other vulnerability types (MassAssignment, Idor, MissingRateLimit, AuthBypass, Csrf,
@@ -163,7 +164,7 @@ IMPORTANT: Your ENTIRE response must be a single JSON object. No text before it.
 {
     "vulnerabilities": [
         {
-            "type": "SqlInjection|Xss|Csrf|MassAssignment|Idor|MissingRateLimit|AuthBypass|InsecureDeserialization|CommandInjection|OpenRedirect|SensitiveDataExposure|WeakPasswordHashing|MissingValidation",
+            "type": "{{VULNERABILITY_TYPES}}",
             "location": "relative/path/to/File.php",
             "line": 42,
             "severity": "Critical|High|Medium|Low",
@@ -185,7 +186,25 @@ Rules:
 - Every fix must be working Laravel code.
 - The summary should acknowledge security controls that ARE in place, not just what's missing.
 - DO NOT write any analysis, reasoning, or explanation. Output ONLY the JSON object.
-PROMPT;
+PROMPT);
+    }
+
+    /**
+     * The pipe-separated type list the model may emit, built from the enum.
+     *
+     * This used to be a hand-maintained literal that had drifted from the
+     * enum: the prompt asked for path traversal, the enum had no such case,
+     * and every chunk where the model obeyed was thrown away by the parser.
+     * Building it from VulnerabilityType makes the enum the single source of
+     * truth — a new case is requestable the moment it exists, and the model
+     * is never invited to emit a type the parser cannot resolve.
+     */
+    private function reportableTypeList(): string
+    {
+        return implode('|', array_map(
+            static fn (VulnerabilityType $type): string => $type->value,
+            VulnerabilityType::aiReportableCases(),
+        ));
     }
 
     /**

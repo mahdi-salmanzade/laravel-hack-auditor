@@ -11,6 +11,7 @@ use Mahdi\HackAuditor\Scanner\Php\ParsedFile;
 use Mahdi\HackAuditor\Scanner\Php\SemanticContext;
 use Mahdi\HackAuditor\Scanner\Php\SemanticWorkspace;
 use Mahdi\HackAuditor\Scanner\Php\TaintJudgement;
+use Mahdi\HackAuditor\Scanner\Php\TaintState;
 use Mahdi\HackAuditor\Scanner\Php\TypeNames;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Support\Confidence;
@@ -120,6 +121,23 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
      * @var array<int, string>
      */
     private const TERMINAL_METHODS = ['first', 'firstorfail', 'sole', 'get'];
+
+    /**
+     * Single-record lookups whose result may be mutated in place:
+     * `Invoice::findOrFail($id)->update(...)`. `get()` is excluded — it yields a
+     * collection, not the one record an identifier names.
+     *
+     * @var array<int, string>
+     */
+    private const MUTABLE_FETCH_METHODS = ['find', 'findorfail', 'first', 'firstorfail', 'sole'];
+
+    /**
+     * Instance calls that write to or remove the record they are called on,
+     * mapped to the policy ability that would authorise them.
+     *
+     * @var array<string, string>
+     */
+    private const MUTATION_METHODS = ['update' => 'update', 'delete' => 'delete', 'forcedelete' => 'forceDelete'];
 
     /**
      * Chain links that key a query on the primary key.
@@ -356,8 +374,10 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
         }
 
         $fetches = $this->candidateFetches($method, $semantic);
+        $mutations = $this->candidateMutations($method, $semantic, $fetches);
+        $bindings = $this->candidateBindings($method, $semantic);
 
-        if ($fetches === []) {
+        if ($fetches === [] && $mutations === [] && $bindings === []) {
             return [];
         }
 
@@ -375,25 +395,27 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
             return [];
         }
 
-        $state = $semantic->taint()->track($method);
         $findings = [];
 
+        foreach ($bindings as $binding) {
+            $finding = $this->inspectBinding($parsed, $class, $method, $binding, $semantic, $entry);
+
+            if ($finding !== null) {
+                $findings[] = $finding;
+            }
+        }
+
+        if ($fetches === [] && $mutations === []) {
+            return $findings;
+        }
+
+        $state = $semantic->taint()->track($method);
+        $reported = [];
+
         foreach ($fetches as $fetch) {
-            $judgement = $semantic->semantics()->judge($fetch['id'], $method, $state);
+            $verdict = $this->judgeLookup($fetch, $method, $semantic, $state, $entry);
 
-            if (! $judgement->isTainted()) {
-                continue;
-            }
-
-            // Without a confirmed route, "this scalar parameter is a route
-            // segment the client chose" is an assumption about routing, not a
-            // fact about the code. An explicit request accessor needs no such
-            // assumption, so only that survives an unknown route table.
-            if ($entry['verdict'] === 'unrouted' && ! $this->isExplicitRequestSource($judgement)) {
-                continue;
-            }
-
-            if (! $this->looksLikeIdentifier($this->identifierLabel($fetch['id']))) {
+            if ($verdict === null) {
                 continue;
             }
 
@@ -403,25 +425,79 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
                 continue;
             }
 
-            $scoped = $this->globalScopeVerdict($fetch['model'], $semantic);
+            $proven = $entry['verdict'] === 'routed' && $verdict['scoped'] === 'unscoped';
+            $reported[spl_object_id($fetch['call'])] = true;
 
-            if ($scoped === 'scoped') {
+            $findings[] = $this->report($parsed, $class, $method, $fetch, $variable, $verdict['judgement'], $semantic, $entry, $verdict['scoped'], $proven);
+        }
+
+        // A lookup the client can key that is then UPDATED or DELETED is the
+        // write-side of the same IDOR. The sink is the mutation itself, so no
+        // exposure proof is needed; every other link of the chain is identical.
+        foreach ($mutations as $mutation) {
+            if (isset($reported[spl_object_id($mutation['call'])])) {
                 continue;
             }
 
-            // IDOR is the claim "you can read a record that belongs to someone
-            // else". On a model this scan can read and that has no owner at
-            // all, that claim is simply false.
-            if ($scoped === 'unscoped' && ! $this->modelHasOwner($fetch['model'], $semantic)) {
+            $verdict = $this->judgeLookup($mutation, $method, $semantic, $state, $entry);
+
+            if ($verdict === null) {
                 continue;
             }
 
-            $proven = $entry['verdict'] === 'routed' && $scoped === 'unscoped';
+            $proven = $entry['verdict'] === 'routed' && $verdict['scoped'] === 'unscoped';
+            $reported[spl_object_id($mutation['call'])] = true;
 
-            $findings[] = $this->report($parsed, $class, $method, $fetch, $variable, $judgement, $semantic, $entry, $scoped, $proven);
+            $findings[] = $this->reportMutation($parsed, $class, $method, $mutation, $verdict['judgement'], $semantic, $entry, $verdict['scoped'], $proven);
         }
 
         return $findings;
+    }
+
+    /**
+     * Links 2, 3, 6 and 7 of the evidence chain for one keyed lookup: the
+     * identifier is attacker controlled and identifier shaped, the model is not
+     * globally scoped, and it can have an owner. Returns null when any link
+     * fails — silence, not suspicion.
+     *
+     * @param  array{call: Node\Expr\MethodCall|Node\Expr\StaticCall, root: Node\Expr\StaticCall, model: string, id: Node\Expr, verb: string, chain: array<int, Node\Expr\MethodCall|Node\Expr\StaticCall>}  $fetch
+     * @param  array{verdict: string, route: string|null, middleware: array<int, string>}  $entry
+     * @return array{judgement: TaintJudgement, scoped: string}|null
+     */
+    private function judgeLookup(array $fetch, MethodShape $method, SemanticContext $semantic, TaintState $state, array $entry): ?array
+    {
+        $judgement = $semantic->semantics()->judge($fetch['id'], $method, $state);
+
+        if (! $judgement->isTainted()) {
+            return null;
+        }
+
+        // Without a confirmed route, "this scalar parameter is a route
+        // segment the client chose" is an assumption about routing, not a
+        // fact about the code. An explicit request accessor needs no such
+        // assumption, so only that survives an unknown route table.
+        if ($entry['verdict'] === 'unrouted' && ! $this->isExplicitRequestSource($judgement)) {
+            return null;
+        }
+
+        if (! $this->looksLikeIdentifier($this->identifierLabel($fetch['id']))) {
+            return null;
+        }
+
+        $scoped = $this->globalScopeVerdict($fetch['model'], $semantic);
+
+        if ($scoped === 'scoped') {
+            return null;
+        }
+
+        // IDOR is the claim "you can read a record that belongs to someone
+        // else". On a model this scan can read and that has no owner at
+        // all, that claim is simply false.
+        if ($scoped === 'unscoped' && ! $this->modelHasOwner($fetch['model'], $semantic)) {
+            return null;
+        }
+
+        return ['judgement' => $judgement, 'scoped' => $scoped];
     }
 
     /*
@@ -562,6 +638,333 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
         }
 
         return $fetches;
+    }
+
+    /**
+     * Every keyed single-record lookup whose record is then UPDATED or DELETED
+     * in this method's own scope, plus every `Model::destroy($id)`:
+     *
+     *   Invoice::findOrFail($id)->update([...]);
+     *   $invoice = Invoice::find($id); ... $invoice->delete();
+     *   Invoice::destroy($id);
+     *
+     * Each entry reuses the fetch shape, with `action` naming the policy
+     * ability that would authorise the write.
+     *
+     * @param  array<int, array{call: Node\Expr\MethodCall|Node\Expr\StaticCall, root: Node\Expr\StaticCall, model: string, id: Node\Expr, verb: string, chain: array<int, Node\Expr\MethodCall|Node\Expr\StaticCall>}>  $fetches
+     * @return array<int, array{call: Node\Expr\MethodCall|Node\Expr\StaticCall, root: Node\Expr\StaticCall, model: string, id: Node\Expr, verb: string, chain: array<int, Node\Expr\MethodCall|Node\Expr\StaticCall>, action: string}>
+     */
+    private function candidateMutations(MethodShape $method, SemanticContext $semantic, array $fetches): array
+    {
+        $statements = $method->statements();
+
+        if ($statements === []) {
+            return [];
+        }
+
+        $calls = (new NodeFinder)->find(
+            $statements,
+            static fn (Node $node): bool => $node instanceof Node\Expr\MethodCall || $node instanceof Node\Expr\StaticCall,
+        );
+
+        $mutations = [];
+
+        foreach ($calls as $call) {
+            if ((! $call instanceof Node\Expr\MethodCall && ! $call instanceof Node\Expr\StaticCall)
+                || ! $call->name instanceof Node\Identifier
+                || $this->isInsideNestedScope($call)) {
+                continue;
+            }
+
+            $name = strtolower($call->name->toString());
+
+            if ($call instanceof Node\Expr\StaticCall) {
+                if ($name !== 'destroy' || ! $call->class instanceof Node\Name) {
+                    continue;
+                }
+
+                $model = $method->file()->resolveName($call->class);
+                $id = $this->argument($call, 0);
+
+                if ($id === null || count($call->getArgs()) !== 1 || ! $semantic->semantics()->isEloquentClass($model)) {
+                    continue;
+                }
+
+                $mutations[] = [
+                    'call' => $call, 'root' => $call, 'model' => $model, 'id' => $id,
+                    'verb' => $call->name->toString(), 'chain' => [$call], 'action' => 'delete',
+                ];
+
+                continue;
+            }
+
+            if (! array_key_exists($name, self::MUTATION_METHODS)) {
+                continue;
+            }
+
+            $action = self::MUTATION_METHODS[$name];
+            $target = $call->var;
+
+            if ($target instanceof Node\Expr\MethodCall || $target instanceof Node\Expr\StaticCall) {
+                $fetch = $this->mutableFetch($target, $method, $semantic);
+
+                if ($fetch !== null) {
+                    $mutations[] = $fetch + ['action' => $action];
+                }
+
+                continue;
+            }
+
+            if (! $target instanceof Node\Expr\Variable || ! is_string($target->name)) {
+                continue;
+            }
+
+            foreach ($fetches as $fetch) {
+                if ($this->assignedVariable($fetch['call']) === $target->name
+                    && in_array(strtolower($fetch['verb']), self::MUTABLE_FETCH_METHODS, true)
+                    && $fetch['call']->getStartLine() <= $call->getStartLine()) {
+                    $mutations[] = $fetch + ['action' => $action];
+
+                    break;
+                }
+            }
+        }
+
+        return $mutations;
+    }
+
+    /**
+     * The keyed single-record lookup an in-place mutation is chained onto, in
+     * the same shape candidateFetches() produces, or null.
+     *
+     * @return array{call: Node\Expr\MethodCall|Node\Expr\StaticCall, root: Node\Expr\StaticCall, model: string, id: Node\Expr, verb: string, chain: array<int, Node\Expr\MethodCall|Node\Expr\StaticCall>}|null
+     */
+    private function mutableFetch(Node\Expr\MethodCall|Node\Expr\StaticCall $call, MethodShape $method, SemanticContext $semantic): ?array
+    {
+        if (! $call->name instanceof Node\Identifier) {
+            return null;
+        }
+
+        $verb = strtolower($call->name->toString());
+
+        if (! in_array($verb, self::MUTABLE_FETCH_METHODS, true)) {
+            return null;
+        }
+
+        $chain = $this->chainCalls($call);
+        $root = $chain[0] ?? null;
+
+        if (! $root instanceof Node\Expr\StaticCall || ! $root->class instanceof Node\Name) {
+            return null;
+        }
+
+        $model = $method->file()->resolveName($root->class);
+
+        if (! $semantic->semantics()->isEloquentClass($model)) {
+            return null;
+        }
+
+        $id = $this->identifierArgument($call, $verb, $chain);
+
+        if ($id === null) {
+            return null;
+        }
+
+        return [
+            'call' => $call, 'root' => $root, 'model' => $model, 'id' => $id,
+            'verb' => $call->name->toString(), 'chain' => $chain,
+        ];
+    }
+
+    /**
+     * Parameters resolved by IMPLICIT route-model binding: typed with an
+     * Eloquent model, not nullable, not variadic, and never reassigned in the
+     * method (a reassignment usually re-resolves the record through a scoped
+     * relation, which this path does not model).
+     *
+     * @return array<int, array{name: string, model: string}>
+     */
+    private function candidateBindings(MethodShape $method, SemanticContext $semantic): array
+    {
+        $bindings = [];
+
+        foreach ($method->parameters() as $parameter) {
+            if ($parameter->isVariadic() || $parameter->isNullable() || $parameter->hasDefault()) {
+                continue;
+            }
+
+            $type = $parameter->classType($method->file());
+
+            if ($type === null || ! $semantic->semantics()->isEloquentClass($type)) {
+                continue;
+            }
+
+            if ($this->isReassigned($method, $parameter->name())) {
+                continue;
+            }
+
+            $bindings[] = ['name' => $parameter->name(), 'model' => $type];
+        }
+
+        return $bindings;
+    }
+
+    /**
+     * Whether a variable is assigned anywhere in the method body.
+     */
+    private function isReassigned(MethodShape $method, string $variable): bool
+    {
+        $statements = $method->statements();
+
+        if ($statements === []) {
+            return false;
+        }
+
+        foreach ((new NodeFinder)->find($statements, static fn (Node $node): bool => $node instanceof Node\Expr\Assign || $node instanceof Node\Expr\AssignRef) as $assign) {
+            if (($assign instanceof Node\Expr\Assign || $assign instanceof Node\Expr\AssignRef)
+                && $assign->var instanceof Node\Expr\Variable
+                && $assign->var->name === $variable) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Examine one route-model-bound parameter that the action hands back.
+     *
+     * This is only ever a REVIEW item. Implicit binding resolves ANY row by
+     * key, so an unguarded `show(Invoice $invoice) { return $invoice; }` is the
+     * textbook IDOR — but a binding can be customised in places this detector
+     * does not read in full (`Route::bind()`, `scopeBindings()`, an explicit
+     * binding in a provider), so absence of authorization is never asserted.
+     * Beyond the method-level guards already checked by the caller, it
+     * requires: a CONFIRMED route whose only parameter is this binding, a
+     * model that is in the scan, unscoped, owned, and that does not override
+     * resolveRouteBinding(), and a controller that declares no static
+     * `middleware()` (Laravel 11's HasMiddleware, which may add `can:`).
+     *
+     * @param  array{name: string, model: string}  $binding
+     * @param  array{verdict: string, route: string|null, middleware: array<int, string>}  $entry
+     */
+    private function inspectBinding(
+        ParsedFile $parsed,
+        ClassShape $class,
+        MethodShape $method,
+        array $binding,
+        SemanticContext $semantic,
+        array $entry,
+    ): ?Vulnerability {
+        if ($entry['verdict'] !== 'routed' || $entry['route'] === null) {
+            return null;
+        }
+
+        if (preg_match_all('/\{[^}]*\}/', $entry['route']) !== 1
+            || preg_match('/\{'.preg_quote($binding['name'], '/').'\??\}/', $entry['route']) !== 1) {
+            return null;
+        }
+
+        if ($this->globalScopeVerdict($binding['model'], $semantic) !== 'unscoped'
+            || ! $this->modelHasOwner($binding['model'], $semantic)
+            || $this->customisesRouteBinding($binding['model'], $semantic)) {
+            return null;
+        }
+
+        foreach ([$class, ...$this->ancestorClasses($class, $semantic)] as $shape) {
+            if ($shape->method('middleware') !== null) {
+                return null;
+            }
+        }
+
+        $line = $this->exposingReturnLine($method, $binding['name'], $semantic);
+
+        if ($line === null) {
+            return null;
+        }
+
+        $model = TypeNames::shortName($binding['model']);
+
+        return new Vulnerability(
+            type: VulnerabilityType::Idor,
+            location: $parsed->path,
+            line: $line,
+            severity: SeverityLevel::Medium,
+            description: sprintf(
+                'Is %s::%s() meant to return any %s to any caller who can reach `%s`? $%s is resolved by route-model binding, which loads whichever row the URL names, and is returned on line %d with no authorization in between. Route bindings can be customised outside the code this scan reads, so this is raised for review rather than reported as a proven IDOR.',
+                $class->shortName(),
+                $method->name(),
+                $model,
+                (string) $entry['route'],
+                $binding['name'],
+                $line,
+            ),
+            proof: sprintf(
+                '$%s is bound from the `{%s}` segment of the route `%s`, whose middleware is [%s] — authentication and plumbing only, no authorization. %s is present in this scan, registers no global scope, does not override resolveRouteBinding(), and has an owner. %s::%s() invokes no $this->authorize()/Gate::/->can() call or permission helper, no ancestor constructor registers authorization middleware or calls authorizeResource(), the controller declares no static middleware(), no injected form request authorises the call, and the record is never compared against the authenticated user.',
+                $binding['name'],
+                $binding['name'],
+                (string) $entry['route'],
+                $entry['middleware'] === [] ? 'none' : implode(', ', $entry['middleware']),
+                $model,
+                $class->shortName(),
+                $method->name(),
+            ),
+            fix: '',
+            findingClass: FindingClass::Review,
+            confidence: Confidence::Possible,
+        );
+    }
+
+    /**
+     * Whether the model (or an ancestor in the scan) overrides how route
+     * binding resolves it — a custom resolver may scope the lookup.
+     */
+    private function customisesRouteBinding(string $model, SemanticContext $semantic): bool
+    {
+        $shape = $semantic->classes()->find($model) ?? $semantic->classes()->resolve($model);
+
+        if ($shape === null) {
+            return true;
+        }
+
+        foreach ($this->ancestorClasses($shape, $semantic) as $ancestor) {
+            foreach (['resolveRouteBinding', 'resolveChildRouteBinding', 'resolveRouteBindingQuery'] as $resolver) {
+                if ($ancestor->method($resolver) !== null) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The line of the first method-scope `return` that provably hands the
+     * named variable back to the client, or null.
+     */
+    private function exposingReturnLine(MethodShape $method, string $variable, SemanticContext $semantic): ?int
+    {
+        $statements = $method->statements();
+
+        if ($statements === []) {
+            return null;
+        }
+
+        // exposes() matches the fetch node by identity; a binding has no fetch
+        // node, so a fresh placeholder that is never in the tree stands in.
+        $noFetch = new Node\Expr\Variable('__route_binding__');
+
+        foreach ((new NodeFinder)->findInstanceOf($statements, Node\Stmt\Return_::class) as $return) {
+            if ($return->expr === null || $this->isInsideNestedScope($return)) {
+                continue;
+            }
+
+            if ($this->exposes($return->expr, $variable, $noFetch, $method, $semantic)) {
+                return $return->getStartLine();
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -1698,6 +2101,115 @@ final class UnauthorizedModelFetchDetector implements AccessControlDetector
                 : '',
             findingClass: $proven ? FindingClass::Vulnerability : FindingClass::Review,
             confidence: $proven ? Confidence::Proven : Confidence::Possible,
+        );
+    }
+
+    /**
+     * Build the finding for a client-keyed lookup that is then updated or
+     * deleted. Same evidence chain and the same proven/review split as
+     * report(); only the sink and the advice differ.
+     *
+     * @param  array{call: Node\Expr\MethodCall|Node\Expr\StaticCall, root: Node\Expr\StaticCall, model: string, id: Node\Expr, verb: string, chain: array<int, Node\Expr\MethodCall|Node\Expr\StaticCall>, action: string}  $mutation
+     * @param  array{verdict: string, route: string|null, middleware: array<int, string>}  $entry
+     */
+    private function reportMutation(
+        ParsedFile $parsed,
+        ClassShape $class,
+        MethodShape $method,
+        array $mutation,
+        TaintJudgement $judgement,
+        SemanticContext $semantic,
+        array $entry,
+        string $scoped,
+        bool $proven,
+    ): Vulnerability {
+        $model = TypeNames::shortName($mutation['model']);
+        $line = $mutation['call']->getStartLine();
+        $verbs = $mutation['action'] === 'update' ? ['updates', 'modify'] : ['deletes', 'delete'];
+        $lookup = sprintf('%s::%s()', $model, $mutation['verb']);
+
+        $description = $proven
+            ? sprintf(
+                '%s::%s() resolves one %s record on line %d with %s, keyed on a client-supplied identifier, and %s it. Any caller can %s another user\'s %s record by changing that identifier (IDOR).',
+                $class->shortName(),
+                $method->name(),
+                $model,
+                $line,
+                $lookup,
+                $verbs[0],
+                $verbs[1],
+                $model,
+            )
+            : sprintf(
+                'Is %s::%s() meant to let any caller %s any %s? It resolves one %s record on line %d with %s, keyed on a client-supplied identifier, and %s it. %s, so this is raised for review rather than reported as a proven IDOR.',
+                $class->shortName(),
+                $method->name(),
+                $verbs[1],
+                $model,
+                $model,
+                $line,
+                $lookup,
+                $verbs[0],
+                $this->unprovenReason($entry, $model),
+            );
+
+        $variable = $this->assignedVariable($mutation['call']);
+
+        return new Vulnerability(
+            type: VulnerabilityType::Idor,
+            location: $parsed->path,
+            line: $line,
+            severity: SeverityLevel::High,
+            description: $description,
+            proof: $this->proof($class, $method, $judgement, $entry, $scoped, $model),
+            fix: $proven
+                ? $this->mutationRemedy($mutation['model'], $model, $mutation['action'], $this->quotableVariable($mutation['call'], $variable), $line, $class, $semantic)
+                : '',
+            findingClass: $proven ? FindingClass::Vulnerability : FindingClass::Review,
+            confidence: $proven ? Confidence::Proven : Confidence::Possible,
+        );
+    }
+
+    /**
+     * Advice for the write-side IDOR, under the same rule as remedy(): an
+     * authorize() call is written only when the resolved policy DECLARES the
+     * matching ability, a variable holding the record is in scope right after
+     * the lookup, and the receiver really has authorize(). A chained
+     * `findOrFail($id)->update()` or `destroy($id)` has no such variable, so it
+     * gets ownership advice with no call in it.
+     */
+    private function mutationRemedy(string $model, string $shortModel, string $action, ?string $variable, int $line, ClassShape $class, SemanticContext $semantic): string
+    {
+        $policy = $semantic->policies()->policyFor($model);
+        $ability = null;
+
+        foreach ($semantic->policies()->abilitiesFor($model) as $declared) {
+            if (strtolower($declared) === strtolower($action)) {
+                $ability = $declared;
+            }
+        }
+
+        if ($policy !== null && $ability !== null && $variable !== null) {
+            $receiver = AuthorizeAvailability::resolve($class, $semantic);
+            $call = $receiver->isCallable()
+                ? sprintf("\$this->authorize('%s', \$%s)", $ability, $variable)
+                : sprintf("Gate::authorize('%s', \$%s)", $ability, $variable);
+
+            return sprintf(
+                '%s declares a `%s` ability, so authorize the record before changing it: add %s immediately after the lookup on line %d%s. Resolving it from a relation on the authenticated user instead is equally valid.',
+                $policy->shortName(),
+                $ability,
+                $call,
+                $line,
+                $receiver->isCallable() ? '' : ', importing Illuminate\Support\Facades\Gate. '.$receiver->reason(),
+            );
+        }
+
+        return sprintf(
+            'Establish ownership before changing this %s: resolve it from a relation on the authenticated user, or constrain the query to the column that stores the owner. No authorize() call is suggested here because this scan resolved no policy declaring a `%s` ability for %s together with a variable holding the record, and calling an ability that does not exist throws at runtime.',
+            $shortModel,
+            $action,
+            $shortModel,
         );
     }
 

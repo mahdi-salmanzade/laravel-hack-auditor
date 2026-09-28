@@ -410,7 +410,7 @@ it('keeps the score when every discovered file was analyzed', function (): void 
 
     expect($report->scoreIsMeaningful())->toBeTrue()
         ->and($report->scoreSuppressionReason())->toBeNull()
-        ->and($report->toArray()['overall_score'])->toBe(88)
+        ->and($report->toArray()['overall_score'])->toBe(100)
         ->and($report->getCoverage()->isComplete())->toBeTrue();
 });
 

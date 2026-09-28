@@ -4,35 +4,80 @@ declare(strict_types=1);
 
 namespace Mahdi\HackAuditor\AI;
 
+use Illuminate\Support\Facades\Log;
 use Mahdi\HackAuditor\Exceptions\InvalidAIResponseException;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 use Mahdi\HackAuditor\Support\SeverityLevel;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
+use Throwable;
 
 final class ResponseParser
 {
     /**
+     * Whether the most recent parse() had to recover findings from a response
+     * that was cut off before its top-level object closed.
+     */
+    private bool $lastParseTruncated = false;
+
+    /**
+     * Why each finding dropped by the most recent parse() was dropped.
+     *
+     * @var array<int, string>
+     */
+    private array $lastSkippedFindings = [];
+
+    /**
      * Parse an AI response string into a VulnerabilityReport.
      *
      * Attempts direct JSON decode first, then falls back to extracting JSON
-     * from markdown code fences. Validates all fields against expected types
-     * and enum values.
+     * from markdown code fences, then to scanning mixed prose for the report
+     * object, and finally to salvaging the complete findings out of a
+     * response that was truncated at max_tokens.
      *
-     * @throws InvalidAIResponseException When the response cannot be parsed or contains invalid data.
+     * Validation is PER FINDING. One chunk carries up to ten files, and the
+     * model routinely gets a single entry slightly wrong — `"line": "42"`,
+     * `"fix": null`, a type spelled its own way. Throwing on that entry used
+     * to discard every other finding in the chunk, so one cosmetic slip hid
+     * real SQL injections in nine unrelated files. Now values are coerced
+     * where the intent is unambiguous, and an entry that cannot be salvaged
+     * (no usable type or location) is skipped with a logged reason while the
+     * rest of the chunk is kept. The response only fails as a whole when no
+     * report object can be recovered from it at all.
+     *
+     * When `$files` (the chunk that was sent) is supplied, each finding's
+     * location must name one of those files — it is rewritten to the chunk's
+     * canonical path — and its line is clamped to that file's length. A
+     * finding that points at a file the model was never shown cannot be
+     * acted on and is dropped. Without `$files`, lines are only clamped to 1.
+     *
+     * @param  array<int, array{path: string, content: string, type?: string}>  $files  The chunk sent to the model, for location/line validation
+     *
+     * @throws InvalidAIResponseException When no report object can be recovered from the response.
      */
-    public function parse(string $response): VulnerabilityReport
+    public function parse(string $response, array $files = []): VulnerabilityReport
     {
-        $data = $this->decodeJson($response);
+        $this->lastParseTruncated = false;
+        $this->lastSkippedFindings = [];
 
-        $this->validateRequiredFields($data);
+        $data = $this->decodeReport($response);
 
-        $vulnerabilities = $this->parseVulnerabilities($data['vulnerabilities']);
+        /** @var array<int|string, mixed> $rawFindings Guaranteed an array by decodeReport(). */
+        $rawFindings = $data['vulnerabilities'];
+
+        $vulnerabilities = $this->parseVulnerabilities($rawFindings, $this->indexChunkFiles($files));
         $vulnerabilities = $this->filterSelfContradictions($vulnerabilities);
         $vulnerabilities = $this->filterBrokenTaintTraces($vulnerabilities);
-        $overallScore = $this->parseOverallScore($data['overall_score']);
-        $summary = $this->parseStringField($data, 'summary');
+        $overallScore = $this->parseOverallScore($data['overall_score'] ?? null, $vulnerabilities);
+        $summary = $this->parseOptionalStringField($data, 'summary');
         $ctfIdea = $this->parseOptionalStringField($data, 'ctf_idea');
+
+        if ($summary === '' && $this->lastParseWasTruncated()) {
+            $summary = sprintf(
+                'AI response was truncated; %d complete finding(s) were recovered and later files in this chunk may be unanalysed.',
+                count($vulnerabilities),
+            );
+        }
 
         return new VulnerabilityReport(
             vulnerabilities: $vulnerabilities,
@@ -40,6 +85,30 @@ final class ResponseParser
             summary: $summary,
             ctfIdea: $ctfIdea,
         );
+    }
+
+    /**
+     * Whether the most recent parse() recovered its findings from a truncated
+     * response (typically the model hitting max_tokens mid-array).
+     *
+     * A truncated chunk is PARTIAL coverage: the findings returned are real,
+     * but whatever the model would have written after the cut is missing, so
+     * callers should surface the chunk as incompletely analysed rather than
+     * treating its score as a clean bill of health.
+     */
+    public function lastParseWasTruncated(): bool
+    {
+        return $this->lastParseTruncated;
+    }
+
+    /**
+     * Reasons for every finding the most recent parse() skipped as unusable.
+     *
+     * @return array<int, string>
+     */
+    public function lastSkippedFindings(): array
+    {
+        return $this->lastSkippedFindings;
     }
 
     /**
@@ -62,15 +131,19 @@ final class ResponseParser
      */
     public function parseVerification(string $raw): array
     {
-        $data = $this->decodeJson($raw);
+        $data = $this->decodeJson($raw, 'verified');
 
         if (! array_key_exists('verified', $data)) {
             throw InvalidAIResponseException::missingField('verified');
         }
 
-        $verified = (bool) $data['verified'];
-        $reasoning = is_string($data['reasoning'] ?? null) ? $data['reasoning'] : '';
-        $exploitRaw = is_string($data['exploit'] ?? null) ? trim($data['exploit']) : '';
+        $verified = $this->coerceBoolean($data['verified']);
+
+        if ($verified === null) {
+            throw InvalidAIResponseException::invalidFieldType('verified', 'boolean', get_debug_type($data['verified']));
+        }
+        $reasoning = $this->coerceString($data['reasoning'] ?? null);
+        $exploitRaw = trim($this->coerceExploit($data['exploit'] ?? null));
 
         if ($verified && ! $this->isSubstantiveExploit($exploitRaw)) {
             return [
@@ -87,6 +160,26 @@ final class ResponseParser
             'exploit' => $verified ? $exploitRaw : null,
             'reasoning' => $reasoning,
         ];
+    }
+
+    /**
+     * Flatten a model-supplied exploit into the string the report shows.
+     *
+     * Models asked for "the exploit" sometimes answer with structure — a
+     * {"request": ..., "payload": ...} object or a list of steps. Dropping
+     * that as "no exploit" downgraded findings the model had in fact
+     * exploited, so structured exploits are kept as pretty-printed JSON and
+     * still go through the placeholder check.
+     */
+    private function coerceExploit(mixed $value): string
+    {
+        if (is_array($value)) {
+            $encoded = json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+            return $value === [] || $encoded === false ? '' : $encoded;
+        }
+
+        return $this->coerceString($value);
     }
 
     /**
@@ -139,34 +232,116 @@ final class ResponseParser
     }
 
     /**
-     * Decode the JSON response, trying direct decode first, then extracting from code fences.
+     * Interpret a model-supplied boolean.
+     *
+     * `(bool) "false"` is TRUE in PHP, so a model that quoted its verdict
+     * ("verified": "false") used to have every unexploitable finding stamped
+     * as exploit-verified. Only unambiguous spellings are accepted; anything
+     * else is null so the caller can treat it as a technical failure.
+     */
+    private function coerceBoolean(mixed $value): ?bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if ($value === 0 || $value === 1) {
+            return $value === 1;
+        }
+
+        if (is_string($value)) {
+            return match (strtolower(trim($value))) {
+                'true', 'yes', '1' => true,
+                'false', 'no', '0' => false,
+                default => null,
+            };
+        }
+
+        return null;
+    }
+
+    /**
+     * Decode the scan report object, salvaging a truncated response if needed.
+     *
+     * A bare JSON list of findings (some models drop the wrapper object) is
+     * accepted as the vulnerabilities array. A decoded object without a
+     * `vulnerabilities` array still fails: treating it as "no findings" would
+     * report an unanalysed chunk as clean.
      *
      * @return array<string, mixed>
      *
      * @throws InvalidAIResponseException
      */
-    private function decodeJson(string $response): array
+    private function decodeReport(string $response): array
     {
-        $trimmed = trim($response);
+        try {
+            $data = $this->decodeJson($response, 'vulnerabilities');
+        } catch (InvalidAIResponseException $e) {
+            $salvaged = $this->salvageTruncatedReport(trim($response));
 
-        $decoded = json_decode($trimmed, true);
+            if ($salvaged === null) {
+                throw $e;
+            }
 
-        if (is_array($decoded)) {
-            return $decoded;
+            return $salvaged;
         }
 
-        $extracted = $this->extractJsonFromCodeFences($trimmed);
+        if ($data !== [] && array_is_list($data)) {
+            $data = ['vulnerabilities' => $data];
+        }
 
-        if ($extracted !== null) {
-            $decoded = json_decode($extracted, true);
+        if (! array_key_exists('vulnerabilities', $data)) {
+            throw InvalidAIResponseException::missingField('vulnerabilities');
+        }
 
-            if (is_array($decoded)) {
+        if (! is_array($data['vulnerabilities'])) {
+            throw InvalidAIResponseException::invalidFieldType(
+                'vulnerabilities',
+                'array',
+                get_debug_type($data['vulnerabilities']),
+            );
+        }
+
+        /** @var array<string, mixed> $data */
+        return $data;
+    }
+
+    /**
+     * Decode the JSON response, trying direct decode first, then extracting from code fences.
+     *
+     * A tier only wins outright when its object carries `$requiredKey`; an
+     * array without it is remembered and returned only if no later tier finds
+     * a better candidate, so the caller can still report the missing field.
+     *
+     * @return array<mixed>
+     *
+     * @throws InvalidAIResponseException
+     */
+    private function decodeJson(string $response, string $requiredKey): array
+    {
+        $trimmed = trim($response);
+        $fallback = null;
+
+        foreach ([$trimmed, $this->extractJsonFromCodeFences($trimmed)] as $candidate) {
+            if ($candidate === null) {
+                continue;
+            }
+
+            $decoded = json_decode($candidate, true);
+
+            if (! is_array($decoded)) {
+                continue;
+            }
+
+            if (array_key_exists($requiredKey, $decoded) || array_is_list($decoded)) {
                 return $decoded;
             }
+
+            $fallback ??= $decoded;
         }
 
         // Last resort: find the first { ... } block that looks like valid JSON
-        $extracted = $this->extractJsonFromMixedText($trimmed);
+        $extracted = $this->extractJsonFromMixedText($trimmed, $requiredKey);
 
         if ($extracted !== null) {
             $decoded = json_decode($extracted, true);
@@ -174,6 +349,10 @@ final class ResponseParser
             if (is_array($decoded)) {
                 return $decoded;
             }
+        }
+
+        if ($fallback !== null) {
+            return $fallback;
         }
 
         throw InvalidAIResponseException::malformed(
@@ -200,10 +379,13 @@ final class ResponseParser
      * Some models return analysis text before/after the JSON object.
      * Uses string-aware brace counting so that braces inside JSON string
      * values (e.g. PHP code snippets) do not confuse the depth tracker.
-     * When the first candidate block does not contain the required keys,
-     * subsequent { ... } blocks are tried.
+     *
+     * Every `{` that could open a JSON object is tried in turn. A candidate
+     * that never balances — "I looked at the { handler" in leading prose —
+     * used to end the search, which threw away a perfectly valid report that
+     * followed it; now the scan simply moves on to the next opening brace.
      */
-    private function extractJsonFromMixedText(string $response): ?string
+    private function extractJsonFromMixedText(string $response, string $requiredKey): ?string
     {
         $offset = 0;
         $length = strlen($response);
@@ -215,28 +397,216 @@ final class ResponseParser
                 return null;
             }
 
+            $offset = $start + 1;
+
+            if (! $this->looksLikeObjectStart($response, $start, $length)) {
+                continue;
+            }
+
             $candidate = $this->extractBalancedBlock($response, $start, $length);
 
             if ($candidate === null) {
-                return null;
+                continue;
             }
 
             $decoded = json_decode($candidate, true);
 
-            if (is_array($decoded) && isset($decoded['vulnerabilities'])) {
+            if (is_array($decoded) && array_key_exists($requiredKey, $decoded)) {
                 return $candidate;
             }
 
-            // This block was valid JSON but not our target, or invalid JSON -- skip past it
-            $offset = $start + strlen($candidate);
-
-            // If it wasn't valid JSON, just skip one character to avoid infinite loop
-            if ($decoded === null) {
-                $offset = $start + 1;
+            // A valid object that is not the target: jump past it entirely.
+            if (is_array($decoded)) {
+                $offset = $start + strlen($candidate);
             }
         }
 
         return null;
+    }
+
+    /**
+     * Whether the `{` at `$start` can open a JSON object: the next
+     * non-whitespace character must be a key quote or the closing brace.
+     *
+     * Cheaply rejects the braces of PHP code and prose ("{ handler", "{\n
+     * $x = 1;"), which keeps the candidate scan linear-ish on long responses.
+     */
+    private function looksLikeObjectStart(string $response, int $start, int $length): bool
+    {
+        for ($i = $start + 1; $i < $length; $i++) {
+            $char = $response[$i];
+
+            if ($char === ' ' || $char === "\n" || $char === "\r" || $char === "\t") {
+                continue;
+            }
+
+            return $char === '"' || $char === '}';
+        }
+
+        return false;
+    }
+
+    /**
+     * Recover the complete findings from a report cut off before it closed.
+     *
+     * Responses that hit max_tokens stop mid-string, so no tier of JSON
+     * decoding can succeed, and the whole chunk used to be discarded even
+     * though most of its findings had been written out in full. This walks
+     * the text with the same string-aware scanner as extractBalancedBlock(),
+     * locates the top-level `"vulnerabilities": [` array, and decodes every
+     * element object that closed before the cut. The half-written trailing
+     * element is dropped.
+     *
+     * An object that DID close but still failed to decode (a trailing comma,
+     * one badly escaped field) is salvaged the same way, without the truncated
+     * flag. Returns null when no vulnerabilities array can be found, or when
+     * the response was cut off before a single finding completed — an empty
+     * salvage is indistinguishable from "clean" and must not be reported as
+     * one.
+     *
+     * @return array{vulnerabilities: array<int, mixed>}|null
+     */
+    private function salvageTruncatedReport(string $response): ?array
+    {
+        $length = strlen($response);
+        $offset = 0;
+
+        while (($start = strpos($response, '{', $offset)) !== false) {
+            $offset = $start + 1;
+
+            if (! $this->looksLikeObjectStart($response, $start, $length)) {
+                continue;
+            }
+
+            $salvage = $this->collectVulnerabilityElements($response, $start, $length);
+
+            if ($salvage === null) {
+                continue;
+            }
+
+            if ($salvage['terminated']) {
+                // The object closed, so it was syntactically malformed (a
+                // trailing comma, an unescaped quote in one field) rather than
+                // truncated. Every element that decodes on its own is complete.
+                $this->warn('AI response was malformed JSON; salvaged the findings that decode individually', [
+                    'recovered' => count($salvage['items']),
+                ]);
+
+                return ['vulnerabilities' => $salvage['items']];
+            }
+
+            if ($salvage['items'] === []) {
+                // Cut off before a single finding completed: nothing to report.
+                return null;
+            }
+
+            $this->lastParseTruncated = true;
+
+            $this->warn('AI response was truncated; salvaged the complete findings', [
+                'recovered' => count($salvage['items']),
+            ]);
+
+            return ['vulnerabilities' => $salvage['items']];
+        }
+
+        return null;
+    }
+
+    /**
+     * Walk one candidate object and collect each complete element of its
+     * top-level `vulnerabilities` array.
+     *
+     * @return array{items: array<int, mixed>, terminated: bool}|null Null when the object has no top-level vulnerabilities array.
+     */
+    private function collectVulnerabilityElements(string $response, int $start, int $length): ?array
+    {
+        // Declared wide on purpose: this is a state machine whose flags flip
+        // across iterations, and narrowing them to their initial literals
+        // makes static analysis conclude the transitions can never happen.
+        $depth = 0;
+        /** @var bool $inString */
+        $inString = false;
+        $stringStart = 0;
+        /** @var string|null $lastTopLevelString */
+        $lastTopLevelString = null;
+        /** @var bool $awaitingArray */
+        $awaitingArray = false;
+        /** @var bool $arrayOpen */
+        $arrayOpen = false;
+        /** @var bool $found */
+        $found = false;
+        /** @var int|null $elementStart */
+        $elementStart = null;
+        $items = [];
+
+        for ($i = $start; $i < $length; $i++) {
+            $char = $response[$i];
+
+            if ($inString) {
+                if ($char === '\\') {
+                    $i++;
+
+                    continue;
+                }
+
+                if ($char === '"') {
+                    $inString = false;
+
+                    if ($depth === 1) {
+                        $lastTopLevelString = substr($response, $stringStart + 1, $i - $stringStart - 1);
+                    }
+                }
+
+                continue;
+            }
+
+            if ($char === ' ' || $char === "\n" || $char === "\r" || $char === "\t") {
+                continue;
+            }
+
+            if ($char === ':') {
+                $awaitingArray = $depth === 1 && $lastTopLevelString === 'vulnerabilities';
+
+                continue;
+            }
+
+            $opensArray = $awaitingArray && $char === '[';
+            $awaitingArray = false;
+
+            if ($char === '"') {
+                $inString = true;
+                $stringStart = $i;
+            } elseif ($char === '{' || $char === '[') {
+                $depth++;
+
+                if ($opensArray && $depth === 2) {
+                    $found = true;
+                    $arrayOpen = true;
+                } elseif ($char === '{' && $arrayOpen && $depth === 3) {
+                    $elementStart = $i;
+                }
+            } elseif ($char === '}' || $char === ']') {
+                $depth--;
+
+                if ($char === '}' && $arrayOpen && $depth === 2 && $elementStart !== null) {
+                    $decoded = json_decode(substr($response, $elementStart, $i - $elementStart + 1), true);
+
+                    if (is_array($decoded)) {
+                        $items[] = $decoded;
+                    }
+
+                    $elementStart = null;
+                } elseif ($char === ']' && $arrayOpen && $depth === 1) {
+                    $arrayOpen = false;
+                }
+
+                if ($depth === 0) {
+                    return $found ? ['items' => $items, 'terminated' => true] : null;
+                }
+            }
+        }
+
+        return $found ? ['items' => $items, 'terminated' => false] : null;
     }
 
     /**
@@ -285,210 +655,366 @@ final class ResponseParser
     }
 
     /**
-     * Validate that all required top-level fields are present.
+     * Index the chunk's files by normalised path for location validation.
      *
-     * @param  array<string, mixed>  $data
-     *
-     * @throws InvalidAIResponseException
+     * @param  array<int, array{path: string, content: string, type?: string}>  $files
+     * @return array<string, array{path: string, lines: int}>
      */
-    private function validateRequiredFields(array $data): void
+    private function indexChunkFiles(array $files): array
     {
-        $required = ['vulnerabilities', 'overall_score', 'summary'];
+        $index = [];
 
-        foreach ($required as $field) {
-            if (! array_key_exists($field, $data)) {
-                throw InvalidAIResponseException::missingField($field);
+        foreach ($files as $file) {
+            $index[$this->normalizePath($file['path'])] = [
+                'path' => $file['path'],
+                'lines' => max(1, substr_count($file['content'], "\n") + 1),
+            ];
+        }
+
+        return $index;
+    }
+
+    /**
+     * Fold a location into a comparable form: forward slashes, no base_path
+     * prefix, no leading "./" or "/", lowercased.
+     */
+    private function normalizePath(string $path): string
+    {
+        $normalized = str_replace('\\', '/', trim($path));
+
+        foreach ($this->basePathPrefixes() as $prefix) {
+            if ($prefix !== '' && str_starts_with(strtolower($normalized), strtolower($prefix).'/')) {
+                $normalized = substr($normalized, strlen($prefix) + 1);
+
+                break;
             }
         }
 
-        if (! is_array($data['vulnerabilities'])) {
-            throw InvalidAIResponseException::invalidFieldType(
-                'vulnerabilities',
-                'array',
-                get_debug_type($data['vulnerabilities']),
-            );
+        while (str_starts_with($normalized, './')) {
+            $normalized = substr($normalized, 2);
+        }
+
+        return strtolower(ltrim($normalized, '/'));
+    }
+
+    /**
+     * The application base path, when a container is available to supply it.
+     *
+     * @return array<int, string>
+     */
+    private function basePathPrefixes(): array
+    {
+        try {
+            return [rtrim(str_replace('\\', '/', base_path()), '/')];
+        } catch (Throwable) {
+            return [];
         }
     }
 
     /**
-     * Parse and validate the vulnerabilities array.
+     * Resolve an AI-reported location to one of the chunk's files.
      *
-     * @param  array<int, mixed>  $items
-     * @return array<int, Vulnerability>
+     * Tries an exact normalised match, then a unique path-suffix match in
+     * either direction (the model shortened the path, or prefixed an absolute
+     * one), then a unique basename match — with or without the ".php" the
+     * model sometimes omits. Ambiguity resolves to null rather than a guess.
      *
-     * @throws InvalidAIResponseException
+     * @param  array<string, array{path: string, lines: int}>  $index
+     * @return array{path: string, lines: int}|null
      */
-    private function parseVulnerabilities(array $items): array
+    private function resolveChunkFile(string $location, array $index): ?array
+    {
+        $needle = $this->normalizePath($location);
+
+        if ($needle === '') {
+            return null;
+        }
+
+        if (isset($index[$needle])) {
+            return $index[$needle];
+        }
+
+        $suffixMatches = array_filter(
+            array_keys($index),
+            static fn (string $key): bool => str_ends_with($key, '/'.$needle) || str_ends_with($needle, '/'.$key),
+        );
+
+        if (count($suffixMatches) === 1) {
+            return $index[array_values($suffixMatches)[0]];
+        }
+
+        $needleBase = basename($needle);
+        $needleStem = pathinfo($needleBase, PATHINFO_FILENAME);
+
+        $baseMatches = array_filter(
+            array_keys($index),
+            static fn (string $key): bool => basename($key) === $needleBase
+                || (! str_contains($needleBase, '.') && pathinfo(basename($key), PATHINFO_FILENAME) === $needleStem),
+        );
+
+        if (count($baseMatches) === 1) {
+            return $index[array_values($baseMatches)[0]];
+        }
+
+        return null;
+    }
+
+    /**
+     * Resolve an AI-reported location to a real file inside the application.
+     *
+     * Absolute paths must sit inside base_path(); relative ones are taken from
+     * it. Only the line count is read, to clamp the reported line.
+     *
+     * @return array{path: string, lines: int}|null
+     */
+    private function resolveAppFile(string $location): ?array
+    {
+        // normalizePath() lowercases for matching; a disk lookup must keep case.
+        $relative = str_replace('\\', '/', trim($location));
+
+        foreach ($this->basePathPrefixes() as $prefix) {
+            if ($prefix !== '' && str_starts_with($relative, $prefix.'/')) {
+                $relative = substr($relative, strlen($prefix) + 1);
+
+                break;
+            }
+        }
+
+        if (str_starts_with($relative, '/') || preg_match('#^[A-Za-z]:/#', $relative) === 1) {
+            return null;
+        }
+
+        while (str_starts_with($relative, './')) {
+            $relative = substr($relative, 2);
+        }
+
+        if ($relative === '' || str_contains('/'.$relative.'/', '/../')) {
+            return null;
+        }
+
+        try {
+            $absolute = base_path($relative);
+        } catch (Throwable) {
+            return null;
+        }
+
+        if (! is_file($absolute) || ! is_readable($absolute)) {
+            return null;
+        }
+
+        $contents = @file_get_contents($absolute);
+
+        if ($contents === false) {
+            return null;
+        }
+
+        return [
+            'path' => $relative,
+            'lines' => max(1, substr_count($contents, "\n") + 1),
+        ];
+    }
+
+    /**
+     * Parse the vulnerabilities array, skipping (never throwing on) bad entries.
+     *
+     * @param  array<int|string, mixed>  $items
+     * @param  array<string, array{path: string, lines: int}>  $chunkFiles
+     * @return array<int, Vulnerability>
+     */
+    private function parseVulnerabilities(array $items, array $chunkFiles): array
     {
         $vulnerabilities = [];
 
         foreach ($items as $index => $item) {
             if (! is_array($item)) {
-                throw InvalidAIResponseException::invalidFieldType(
-                    "vulnerabilities[{$index}]",
-                    'object',
-                    get_debug_type($item),
-                );
+                $this->skipFinding($index, 'entry is '.get_debug_type($item).', not an object');
+
+                continue;
             }
 
-            $vulnerabilities[] = $this->parseVulnerability($item, $index);
+            $vulnerability = $this->parseVulnerability($item, $index, $chunkFiles);
+
+            if ($vulnerability !== null) {
+                $vulnerabilities[] = $vulnerability;
+            }
         }
 
         return $vulnerabilities;
     }
 
     /**
-     * Parse a single vulnerability entry from the AI response.
+     * Parse a single vulnerability entry, or null (with a logged reason) when
+     * it cannot be turned into an actionable finding.
+     *
+     * Only TYPE and LOCATION are load-bearing enough to skip on: without them
+     * the finding cannot be classified or found. Everything else degrades to
+     * a safe default — numeric strings are coerced, a missing proof or fix is
+     * empty, an unusable line is 1, an unknown severity falls back to Low
+     * (logged by SeverityLevel), and a missing description falls back to the
+     * type's own description.
      *
      * @param  array<string, mixed>  $item
-     *
-     * @throws InvalidAIResponseException
+     * @param  array<string, array{path: string, lines: int}>  $chunkFiles
      */
-    private function parseVulnerability(array $item, int $index): Vulnerability
+    private function parseVulnerability(array $item, int|string $index, array $chunkFiles): ?Vulnerability
     {
-        $requiredFields = ['type', 'location', 'line', 'severity', 'description', 'proof', 'fix'];
+        $rawType = $item['type'] ?? null;
 
-        foreach ($requiredFields as $field) {
-            if (! array_key_exists($field, $item)) {
-                throw InvalidAIResponseException::missingField("vulnerabilities[{$index}].{$field}");
+        if (! is_string($rawType) || trim($rawType) === '') {
+            $this->skipFinding($index, 'type is missing or not a string');
+
+            return null;
+        }
+
+        $type = VulnerabilityType::tryFromString($rawType);
+
+        if ($type === null) {
+            $this->skipFinding($index, "unknown vulnerability type \"{$rawType}\"");
+
+            return null;
+        }
+
+        $location = $item['location'] ?? null;
+
+        if (! is_string($location) || trim($location) === '') {
+            $this->skipFinding($index, 'location is missing or not a string');
+
+            return null;
+        }
+
+        $line = $this->coerceLine($item['line'] ?? null);
+
+        if ($chunkFiles !== []) {
+            // A model often attributes a finding to a related file it was not
+            // sent — the model behind a controller, the route file — and those
+            // findings can be real. Only a location that exists nowhere in the
+            // application is treated as invented.
+            $file = $this->resolveChunkFile($location, $chunkFiles) ?? $this->resolveAppFile($location);
+
+            if ($file === null) {
+                $this->skipFinding($index, "location \"{$location}\" is neither in this chunk nor a file in the application");
+
+                return null;
             }
+
+            $location = $file['path'];
+            $line = min($line, $file['lines']);
         }
 
-        $type = $this->parseVulnerabilityType($item['type'], $index);
-        $severity = $this->parseSeverityLevel($item['severity'], $index);
+        $severity = is_string($item['severity'] ?? null)
+            ? SeverityLevel::fromString($item['severity'])
+            : SeverityLevel::fromString('');
 
-        if (! is_string($item['location'])) {
-            throw InvalidAIResponseException::invalidFieldType(
-                "vulnerabilities[{$index}].location",
-                'string',
-                get_debug_type($item['location']),
-            );
-        }
-
-        if (! is_int($item['line']) && ! is_float($item['line'])) {
-            throw InvalidAIResponseException::invalidFieldType(
-                "vulnerabilities[{$index}].line",
-                'integer',
-                get_debug_type($item['line']),
-            );
-        }
-
-        if (! is_string($item['description'])) {
-            throw InvalidAIResponseException::invalidFieldType(
-                "vulnerabilities[{$index}].description",
-                'string',
-                get_debug_type($item['description']),
-            );
-        }
-
-        if (! is_string($item['proof'])) {
-            throw InvalidAIResponseException::invalidFieldType(
-                "vulnerabilities[{$index}].proof",
-                'string',
-                get_debug_type($item['proof']),
-            );
-        }
-
-        if (! is_string($item['fix'])) {
-            throw InvalidAIResponseException::invalidFieldType(
-                "vulnerabilities[{$index}].fix",
-                'string',
-                get_debug_type($item['fix']),
-            );
-        }
-
-        $taintTrace = $this->parseOptionalTaintTrace($item);
+        $description = $this->coerceString($item['description'] ?? null);
 
         return new Vulnerability(
             type: $type,
-            location: $item['location'],
-            line: (int) $item['line'],
+            location: $location,
+            line: $line,
             severity: $severity,
-            description: $item['description'],
-            proof: $item['proof'],
-            fix: $item['fix'],
-            taintTrace: $taintTrace,
+            description: $description !== '' ? $description : $type->description(),
+            proof: $this->coerceString($item['proof'] ?? null),
+            fix: $this->coerceString($item['fix'] ?? null),
+            taintTrace: $this->parseOptionalTaintTrace($item),
         );
     }
 
     /**
-     * Parse a vulnerability type string using case-insensitive matching.
+     * Coerce a model-supplied line number to a positive integer.
      *
-     * @throws InvalidAIResponseException
+     * Accepts ints, floats and numeric strings ("42", " 42 "), and takes the
+     * first number of a range or label ("42-45", "L42"). Anything unusable —
+     * null, 0, negative, prose — becomes line 1: the finding still points at
+     * the right file, which is more useful than discarding it.
      */
-    private function parseVulnerabilityType(mixed $value, int $index): VulnerabilityType
+    private function coerceLine(mixed $value): int
     {
-        if (! is_string($value)) {
-            throw InvalidAIResponseException::invalidFieldType(
-                "vulnerabilities[{$index}].type",
-                'string',
-                get_debug_type($value),
-            );
-        }
+        $line = match (true) {
+            is_int($value) => $value,
+            is_float($value) => (int) $value,
+            is_string($value) && is_numeric(trim($value)) => (int) trim($value),
+            is_string($value) && preg_match('/\d+/', $value, $match) === 1 => (int) $match[0],
+            default => 1,
+        };
 
-        try {
-            return VulnerabilityType::fromString($value);
-        } catch (\ValueError $e) {
-            throw InvalidAIResponseException::malformed(
-                "Invalid vulnerability type \"{$value}\" at vulnerabilities[{$index}].type.",
-            );
-        }
+        return max(1, $line);
     }
 
     /**
-     * Parse a severity level string using case-insensitive matching.
-     *
-     * @throws InvalidAIResponseException
+     * Coerce a free-text field to a string: strings pass through, scalars are
+     * stringified, null/arrays/objects become empty.
      */
-    private function parseSeverityLevel(mixed $value, int $index): SeverityLevel
+    private function coerceString(mixed $value): string
     {
-        if (! is_string($value)) {
-            throw InvalidAIResponseException::invalidFieldType(
-                "vulnerabilities[{$index}].severity",
-                'string',
-                get_debug_type($value),
-            );
+        if (is_string($value)) {
+            return $value;
         }
 
-        return SeverityLevel::fromString($value);
+        if (is_int($value) || is_float($value)) {
+            return (string) $value;
+        }
+
+        return '';
+    }
+
+    /**
+     * Record and log why one finding in the response was dropped.
+     */
+    private function skipFinding(int|string $index, string $reason): void
+    {
+        $this->lastSkippedFindings[] = "vulnerabilities[{$index}]: {$reason}";
+
+        $this->warn('Skipped unusable AI finding', [
+            'index' => $index,
+            'reason' => $reason,
+        ]);
+    }
+
+    /**
+     * Log a parser warning without letting logging break parsing.
+     *
+     * The parser also runs outside a booted app (standalone benchmark, plain
+     * unit tests), where the Log facade has no root to resolve.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    private function warn(string $message, array $context = []): void
+    {
+        try {
+            Log::warning("[HackAuditor] {$message}", $context);
+        } catch (Throwable) {
+            // No container bound — nothing to log to.
+        }
     }
 
     /**
      * Parse and clamp the overall score to a 0-100 range.
      *
-     * @throws InvalidAIResponseException
+     * Numeric strings ("40") are accepted. When the score is missing or not a
+     * number (including every salvaged, truncated response) it is derived
+     * from the parsed findings with the same 100-minus-severity-weights
+     * formula the scanner uses, so an unusable score never hides findings
+     * behind a default of 100.
+     *
+     * @param  array<int, Vulnerability>  $vulnerabilities
      */
-    private function parseOverallScore(mixed $value): int
+    private function parseOverallScore(mixed $value, array $vulnerabilities): int
     {
+        if (is_string($value) && is_numeric(trim($value))) {
+            $value = (float) trim($value);
+        }
+
         if (! is_int($value) && ! is_float($value)) {
-            throw InvalidAIResponseException::invalidFieldType(
-                'overall_score',
-                'integer',
-                get_debug_type($value),
-            );
+            $penalty = 0;
+
+            foreach ($vulnerabilities as $vulnerability) {
+                $penalty += $vulnerability->severity->weight();
+            }
+
+            return max(0, 100 - $penalty);
         }
 
         return max(0, min(100, (int) $value));
-    }
-
-    /**
-     * Parse a required string field from the response data.
-     *
-     * @param  array<string, mixed>  $data
-     *
-     * @throws InvalidAIResponseException
-     */
-    private function parseStringField(array $data, string $field): string
-    {
-        if (! is_string($data[$field])) {
-            throw InvalidAIResponseException::invalidFieldType(
-                $field,
-                'string',
-                get_debug_type($data[$field]),
-            );
-        }
-
-        return $data[$field];
     }
 
     /**

@@ -135,8 +135,19 @@ it('command with --severity flag filters results by minimum severity', function 
 it('command returns failure exit code when critical vulnerabilities are found', function (): void {
     $this->app->instance(AIAdapter::class, mockAIAdapterForScan(buildScanAIResponse(score: 15)));
 
-    $this->artisan('hack:scan', ['--json' => true])
-        ->assertFailed();
+    // The canned findings name these files; a finding in a file that does not
+    // exist is treated as invented and dropped.
+    $cleanup = createAppStubFiles([
+        'app/Http/Controllers/UserController.php',
+        'app/Http/Controllers/ProfileController.php',
+    ]);
+
+    try {
+        $this->artisan('hack:scan', ['--json' => true, '--force' => true])
+            ->assertFailed();
+    } finally {
+        $cleanup();
+    }
 });
 
 it('command returns success exit code when no critical vulnerabilities are found', function (): void {

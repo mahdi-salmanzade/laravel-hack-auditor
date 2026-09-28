@@ -2,7 +2,7 @@
   <img src="art/banner.jpg" width="700" alt="Laravel Hack Auditor">
 </p>
 
-<h3 align="center">Watch AI hack your Laravel app in 15 seconds.</h3>
+<h3 align="center">AI-assisted security audits for Laravel — every claim backed by evidence.</h3>
 
 <p align="center">
   <a href="https://packagist.org/packages/mahdisphp/laravel-hack-auditor"><img src="https://img.shields.io/packagist/v/mahdisphp/laravel-hack-auditor" alt="Latest Version"></a>
@@ -10,7 +10,7 @@
   <a href="https://github.com/mahdi-salmanzade/laravel-hack-auditor"><img src="https://img.shields.io/github/stars/mahdi-salmanzade/laravel-hack-auditor" alt="Stars"></a>
 </p>
 
-Watch AI literally hack a vulnerable Laravel controller in front of your eyes — no setup, no API key.
+See what a scan report looks like on a deliberately vulnerable controller — no setup, no API key. The demo replays **pre-recorded** findings (no AI call is made); `hack:scan` runs the real analysis on your code.
 
 <p align="center">
   <img src="art/demo.gif" width="600" alt="hack:demo in action">
@@ -21,7 +21,7 @@ composer require mahdisphp/laravel-hack-auditor
 php artisan hack:demo
 ```
 
-That's it. Two commands. Watch 12 vulnerabilities get ripped out of a controller in your terminal.
+That's it. Two commands: 11 confirmed vulnerabilities and 1 review question on a planted controller, scored with the same formula as a real scan. Pass `--copy` to copy the share text to your clipboard (nothing is copied without it).
 
 ---
 
@@ -31,8 +31,9 @@ That's it. Two commands. Watch 12 vulnerabilities get ripped out of a controller
 php artisan hack:demo                   # See it in action (no API key)
 php artisan hack:scan                   # Scan YOUR app with AI
 php artisan hack:scan --diff --html     # Scan only changed files, export HTML report
+php artisan hack:scan --format=sarif    # SARIF 2.1.0 for GitHub code scanning
 php artisan hack:ctf sql_injection      # Turn vulns into CTF challenges
-php artisan hack:report --latest        # Generate HTML report from saved scan
+php artisan hack:report --latest        # HTML (or --format=sarif|markdown) report from saved scan
 php artisan hack:benchmark              # Measure recall (precision/recall/F1) on the labeled corpus
 php artisan hack:help                   # Full command reference
 php artisan hack:usage                  # Token usage & cost stats
@@ -160,20 +161,28 @@ HACK_AUDITOR_AI_MODEL=claude-opus-5
 
 | Flag | What it does |
 |------|-------------|
-| `--path=app/Http/Controllers` | Scan a specific directory (walks it recursively) or a single file |
-| `--severity=High` | Filter to High+ only |
-| `--fix` | Include fix suggestions |
-| `--json` | JSON output for CI/CD |
+| `--path=app/Http/Controllers` | Scan a specific directory (walks it recursively) or a single file. A missing or refused path exits `2` |
+| `--severity=High` | Show and gate on High+ only (default: `severity.minimum_report`, else `Low`) |
+| `--fail-on=high` | Exit `1` when a confirmed finding at or above this severity remains after `--severity` and the baseline: `critical` (default), `high`, `medium`, `low` or `none` |
+| `--format=sarif` | Output format: `table` (default), `json`, `sarif` (SARIF 2.1.0) or `markdown` |
+| `--json` | JSON output for CI/CD (alias for `--format=json`) |
+| `--fix` | Show suggested fixes — only for confirmed findings that carry one |
+| `--verify` | Second AI pass that tries to build an exploit for each HIGH+ finding; unexploitable ones are downgraded a tier |
+| `--deterministic` | Run only the reproducible, provider-independent detectors — no AI key, no network |
 | `--html` | Generate HTML report |
-| `--save` | Save results to JSON file |
+| `--save` | Save results to JSON file (for `hack:report`, `hack:ctf --from-scan` and the "since last scan" delta) |
 | `--force` | Skip confirmation prompt |
-| `--detailed` | Full descriptions in table |
-| `--diff` | Only scan git-changed files (great for CI) |
+| `--detailed` | Full descriptions, confidence, CWE and taint trace per finding |
+| `--diff` | Only scan git-changed files (great for CI), in one chunked pass. Combine with `--path` to restrict to a subtree. Works when the app lives in a monorepo subdirectory. A base that cannot be resolved — typically a shallow CI checkout; use `fetch-depth: 0` — exits `2` instead of reporting no changes |
 | `--base=develop` | Base branch for `--diff` |
 | `--limit=50000` | Cap token budget for the scan |
-| `--baseline` | Apply baseline to suppress known findings (auto-applied if file exists) |
+| `--baseline` | Require the baseline: exit `2` if the file is missing (it is applied automatically whenever it exists) |
 | `--update-baseline` | Save current findings as baseline |
 | `--no-baseline` | Ignore baseline file |
+
+**Exit codes:** `0` no confirmed finding at or above `--fail-on`; `1` at least one remains after filters; `2` invalid usage, or the scan target was missing/refused (nothing was scanned). Review items never affect the exit code.
+
+**Score:** `max(0, 100 − Σ severity weight)` over confirmed vulnerabilities (critical 40, high 20, medium 10, low 5). It is withheld (`null`, with a reason) when coverage was incomplete, nothing was analysed, or the scan target could not be resolved.
 
 </details>
 
@@ -182,8 +191,9 @@ HACK_AUDITOR_AI_MODEL=claude-opus-5
 
 | Flag | What it does |
 |------|-------------|
-| `--latest` | Generate report from the most recent saved scan |
+| `--latest` | Generate report from the most recent saved scan (the default) |
 | `--id=ULID` | Generate report from a specific scan ID |
+| `--format=html` | `html` (default), `sarif` or `markdown` |
 | `--output=path` | Custom output file path |
 
 </details>
@@ -206,7 +216,7 @@ Train your team by turning actual findings into Capture The Flag exercises:
 ```bash
 php artisan hack:ctf sql_injection    # By type
 php artisan hack:ctf --from-scan      # From latest scan results
-php artisan hack:ctf --all            # Generate for every finding
+php artisan hack:ctf --all            # Every finding in the latest saved scan (implies --from-scan)
 ```
 
 Each challenge outputs a ready-to-run directory: README, vulnerable code, solution, flag file, and docker-compose.
@@ -222,7 +232,9 @@ php artisan hack:report --latest        # Regenerate report from saved scan
 
 The HTML report is a single self-contained file — dark theme, animated score ring, collapsible cards, copy-paste code blocks, token usage breakdown. Professional enough to attach to a security audit.
 
-`--diff` scans only what your PR touches. `--update-baseline` lets teams acknowledge known risks so CI doesn't fail on accepted findings.
+`--diff` scans only what your PR touches. `--update-baseline` lets teams acknowledge known risks so CI doesn't fail on accepted findings. Baseline entries are matched by a **fingerprint** — type + file + the normalised content of the flagged line — so an accepted finding stays accepted when the AI rewords it or code above it moves, and two identical flaws in one file stay two findings. Baselines written by older versions are still honoured.
+
+Every finding in JSON, SARIF and MCP output carries that `fingerprint`, its `confidence`, its `class` (vulnerability or review) and `references` (the CWE entry plus the OWASP Cheat Sheet for its type). JSON output also carries `score_breakdown`: the per-severity count × weight that produced the score, or `null` when the score is withheld.
 
 ## Use it in code
 
@@ -267,9 +279,13 @@ jobs:
         with:
           php-version: '8.3'
       - run: composer install --no-interaction
-      - run: php artisan hack:scan --json --severity=High --force
+      - run: php artisan hack:scan --format=sarif --fail-on=high --force > hack-auditor.sarif
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: hack-auditor.sarif
 ```
 
 </details>
@@ -301,11 +317,14 @@ php artisan vendor:publish --tag=hack-auditor-config
 | `context.max_context_tokens` | `8000` | Token budget for context |
 | `context.include_routes` | `true` | Include route info in context |
 | `context.include_middleware` | `true` | Include middleware info in context |
+| `context.include_rate_limiters` | `true` | Include registered rate limiters in context |
 | `context.include_policies` | `true` | Include policy info in context |
 | `context.include_form_requests` | `true` | Include form request info in context |
 | `context.include_models` | `true` | Include model info in context |
+| `context.include_config` | `true` | Include security-relevant config values in context |
+| `context.include_environment` | `true` | Include environment facts (e.g. debug mode) in context |
 | `context.extra_context_paths` | `[]` | Additional paths to include in context |
-| `severity.minimum_report` | `'Low'` | Minimum severity to include in reports |
+| `severity.minimum_report` | `'Low'` | Default for `hack:scan --severity` (also scopes the `--fail-on` gate) |
 | `ctf.output_path` | `hack-auditor/ctf` | CTF output directory |
 | `report.output_path` | `hack-auditor/reports` | HTML report output directory |
 | `share.default_hashtags` | `['#LaravelSecurity', '#HackAuditor', '#CTF']` | Hashtags for sharing |
@@ -315,6 +334,7 @@ php artisan vendor:publish --tag=hack-auditor-config
 | `usage.cost_per_1m_output` | `15.00` | Cost per 1M output tokens |
 | `usage.show_usage` | `true` | Show token usage after scan |
 | `usage.log_enabled` | `true` | Auto-log usage to `storage/hack-auditor/usage.json` |
+| `verification.enabled` | `false` | Run `--verify` on every scan (`HACK_AUDITOR_VERIFY`) |
 
 Zero database dependencies. All data stored as JSON files in `storage/hack-auditor/`.
 

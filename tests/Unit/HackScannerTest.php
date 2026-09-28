@@ -96,7 +96,7 @@ it('scans raw code with scanCode and returns a VulnerabilityReport', function ()
     $report = $scanner->scanCode($code);
 
     expect($report)->toBeInstanceOf(VulnerabilityReport::class)
-        ->and($report->overallScore)->toBe(25)
+        ->and($report->overallScore)->toBe(60)
         ->and($report->totalCount())->toBe(1)
         ->and($report->vulnerabilities[0]->type)->toBe(VulnerabilityType::SqlInjection)
         ->and($report->vulnerabilities[0]->severity)->toBe(SeverityLevel::Critical)
@@ -262,10 +262,14 @@ it('still scans a normal in-app controller path', function (): void {
 
     $scanner = createMockedScanner(buildSingleVulnerabilityResponse());
 
+    // The canned response attributes its finding to UserController.php.
+    $cleanup = createAppStubFiles(['app/Http/Controllers/UserController.php']);
+
     try {
         $report = $scanner->scanFile('app/Http/Controllers/GuardTestController.php');
     } finally {
         @unlink($controllerPath);
+        $cleanup();
     }
 
     expect($report->summary)->not->toContain('Refused to scan')

@@ -189,7 +189,7 @@ it('collapses same-type findings whose locations differ only in path format (bas
         ->and($merged[0]->description)->toBe('ai');
 });
 
-it('collapses two same-type findings at nearby lines from the same source list in merge', function (): void {
+it('keeps two same-type AI findings at nearby but different lines as separate claims', function (): void {
     $first = new Vulnerability(
         type: VulnerabilityType::Idor,
         location: 'app/Http/Controllers/InvoiceController.php',
@@ -212,8 +212,7 @@ it('collapses two same-type findings at nearby lines from the same source list i
 
     $merged = (new AccessControlAnalyzer)->merge([$first, $second], []);
 
-    expect($merged)->toHaveCount(1)
-        ->and($merged[0]->description)->toBe('first');
+    expect($merged)->toHaveCount(2);
 });
 
 it('collapses an Idor and an AuthBypass at the same location into one finding in dedupe (H3)', function (): void {
@@ -305,4 +304,140 @@ it('does NOT collapse a non-access-control type at the same location as an Idor 
     );
 
     expect($analyzer->merge([$aiIdor], [$detCsrf]))->toHaveCount(2);
+});
+
+/**
+ * Build a finding for the dedupe regression tests below.
+ */
+function dedupeFinding(string $location, int $line, VulnerabilityType $type = VulnerabilityType::SqlInjection, string $description = 'd'): Vulnerability
+{
+    return new Vulnerability(
+        type: $type,
+        location: $location,
+        line: $line,
+        severity: SeverityLevel::Critical,
+        description: $description,
+        proof: 'p',
+        fix: 'f',
+    );
+}
+
+it('never merges AI findings in different files that only share a basename', function (): void {
+    $merged = (new AccessControlAnalyzer)->merge([
+        dedupeFinding('app/Http/Controllers/Api/UserController.php', 40),
+        dedupeFinding('app/Http/Controllers/Admin/UserController.php', 42),
+    ], []);
+
+    expect($merged)->toHaveCount(2);
+});
+
+it('never merges an AI finding with a deterministic finding in a same-basename different file', function (): void {
+    $merged = (new AccessControlAnalyzer)->merge(
+        [dedupeFinding('app/Http/Controllers/Api/UserController.php', 40)],
+        [dedupeFinding('app/Http/Controllers/Admin/UserController.php', 42)],
+    );
+
+    expect($merged)->toHaveCount(2);
+});
+
+it('keeps two AI SQL injections four lines apart in the same file (r5 repro)', function (): void {
+    $merged = (new AccessControlAnalyzer)->merge([
+        dedupeFinding('app/Http/Controllers/ReportController.php', 10),
+        dedupeFinding('app/Http/Controllers/ReportController.php', 14),
+    ], []);
+
+    expect($merged)->toHaveCount(2);
+});
+
+it('keeps an AI idor and an AI auth_bypass on different lines of the same file', function (): void {
+    $merged = (new AccessControlAnalyzer)->merge([
+        dedupeFinding('app/Http/Controllers/PostController.php', 20, VulnerabilityType::Idor),
+        dedupeFinding('app/Http/Controllers/PostController.php', 24, VulnerabilityType::AuthBypass),
+    ], []);
+
+    expect($merged)->toHaveCount(2);
+});
+
+it('still collapses exact AI duplicates regardless of path format', function (): void {
+    $merged = (new AccessControlAnalyzer)->merge([
+        dedupeFinding('app/Http/Controllers/ReportController.php', 10, description: 'first'),
+        dedupeFinding('./app\\Http\\Controllers\\ReportController.php', 10, description: 'second'),
+    ], []);
+
+    expect($merged)->toHaveCount(1)
+        ->and($merged[0]->description)->toBe('first');
+});
+
+it('collapses a deterministic finding near an AI finding in the same file across base_path formats', function (): void {
+    $merged = (new AccessControlAnalyzer)->merge(
+        [dedupeFinding('app/Http/Controllers/InvoiceController.php', 14, VulnerabilityType::Idor, 'ai')],
+        [dedupeFinding(base_path('app/Http/Controllers/InvoiceController.php'), 11, VulnerabilityType::Idor, 'det')],
+    );
+
+    expect($merged)->toHaveCount(1)
+        ->and($merged[0]->description)->toBe('ai');
+});
+
+it('does not collapse a deterministic finding more than LINE_PROXIMITY lines from the AI finding', function (): void {
+    $merged = (new AccessControlAnalyzer)->merge(
+        [dedupeFinding('app/Http/Controllers/InvoiceController.php', 10, VulnerabilityType::Idor)],
+        [dedupeFinding('app/Http/Controllers/InvoiceController.php', 30, VulnerabilityType::Idor)],
+    );
+
+    expect($merged)->toHaveCount(2);
+});
+
+it('reports one access-control finding per method when two detectors reach the same missing check', function (): void {
+    // PolicyRouteMismatch flags the unapplied policy at the signature; the
+    // write-side IDOR rule flags the unguarded update lines later. One bug,
+    // one fix — it must not be counted twice.
+    $bypass = new Vulnerability(
+        type: VulnerabilityType::AuthBypass,
+        location: 'app/Http/Controllers/PostController.php',
+        line: 7,
+        severity: SeverityLevel::High,
+        description: 'Policy defined but never applied.',
+        proof: 'update()',
+        fix: '',
+    );
+    $idor = new Vulnerability(
+        type: VulnerabilityType::Idor,
+        location: 'app/Http/Controllers/PostController.php',
+        line: 16,
+        severity: SeverityLevel::High,
+        description: 'Unguarded update by id.',
+        proof: '$post->update()',
+        fix: '',
+    );
+    $otherMethodIdor = new Vulnerability(
+        type: VulnerabilityType::Idor,
+        location: 'app/Http/Controllers/PostController.php',
+        line: 21,
+        severity: SeverityLevel::High,
+        description: 'Unguarded fetch by id.',
+        proof: 'Post::findOrFail($id)',
+        fix: '',
+    );
+
+    $detector = new class([$bypass, $idor, $otherMethodIdor]) implements AccessControlDetector
+    {
+        public function __construct(private array $findings) {}
+
+        public function detect(array $files, AccessControlContext $context): array
+        {
+            return $this->findings;
+        }
+    };
+
+    $source = "<?php\n\nnamespace App\\Http\\Controllers;\n\nclass PostController\n{\n    public function update(\$id)\n    {\n"
+        .str_repeat("        // ...\n", 7)
+        ."        \$post->update(request()->all());\n    }\n\n    public function show(\$id)\n    {\n        return Post::findOrFail(\$id);\n    }\n}\n";
+
+    $findings = (new AccessControlAnalyzer([$detector]))->analyze(
+        [['path' => 'app/Http/Controllers/PostController.php', 'type' => 'controller', 'content' => $source]],
+        new AccessControlContext,
+    );
+
+    expect(array_map(fn ($f): string => $f->type->value.'@'.$f->line, $findings))
+        ->toBe(['auth_bypass@7', 'idor@21']);
 });

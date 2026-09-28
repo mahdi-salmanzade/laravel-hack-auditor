@@ -1196,7 +1196,7 @@ final class LaravelSemantics
      * Arguments are quoted only when every one of them is a scalar literal that
      * is already written in the file; anything computed collapses to `...`.
      *
-     * @param  array<int, Node\Arg|Node\VariadicPlaceholder>  $args
+     * @param  array<int, Node\Arg|Node\ArgPlaceholder|Node\VariadicPlaceholder>  $args
      */
     private function renderArguments(array $args, int $depth): string
     {

@@ -7,6 +7,10 @@ namespace Mahdi\HackAuditor\Scanner\AccessControl;
 use Mahdi\HackAuditor\Scanner\Php\SemanticWorkspace;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Support\VulnerabilityType;
+use PhpParser\Node\Stmt\ClassMethod;
+use PhpParser\NodeFinder;
+use PhpParser\ParserFactory;
+use Throwable;
 
 /**
  * Orchestrates the deterministic access-control detectors and reconciles their
@@ -17,8 +21,8 @@ use Mahdi\HackAuditor\Support\VulnerabilityType;
  * reproducible. Alongside the access-control detectors it also runs two further
  * reproducible detectors that close known AI-variance false-negatives — SSRF
  * (CWE-918, OWASP A10) and Sensitive Data Exposure (CWE-200, OWASP A02) — and
- * de-duplicates across both its own output and the AI findings so the report
- * never double-reports the same issue at the same file+line+type.
+ * reconciles its output with the AI findings so the report never
+ * double-reports the same issue (see merge() for the exact rules).
  */
 final class AccessControlAnalyzer
 {
@@ -37,16 +41,27 @@ final class AccessControlAnalyzer
     ];
 
     /**
-     * Maximum line distance at which two same-file, same-type findings are
-     * treated as the same issue and collapsed. Covers the common gap between a
+     * Maximum line distance at which an AI finding and a deterministic finding
+     * of the same file and type are treated as the same issue and collapsed. Covers the common gap between a
      * method signature and the vulnerable statement a few lines into its body.
      */
     private const LINE_PROXIMITY = 5;
 
     /**
+     * Maximum line distance at which two findings from the SAME source may be
+     * one issue reported twice — and then only with identical evidence.
+     */
+    private const SAME_SOURCE_PROXIMITY = 2;
+
+    /**
      * @var array<int, AccessControlDetector>
      */
     private array $detectors;
+
+    /**
+     * Cached, normalised application base path; false until first resolved.
+     */
+    private string|false|null $basePath = false;
 
     /**
      * @param  array<int, AccessControlDetector>|null  $detectors
@@ -97,21 +112,116 @@ final class AccessControlAnalyzer
             }
         }
 
-        return $this->dedupe($found);
+        return $this->collapseSameMethodAccessControl($this->dedupe($found), $sourceFiles);
+    }
+
+    /**
+     * Keep one access-control finding per method.
+     *
+     * Two detectors can reach the same missing check from different ends: the
+     * policy/route-mismatch detector reports a policy that exists but is never
+     * applied (at the method signature), and the unauthorized-fetch detector
+     * reports the unguarded record write it enables (at the statement, lines
+     * later). Both are true and both describe ONE fix, so reporting both
+     * double-counts a single bug in the score and in the build gate. Within a
+     * method the AuthBypass finding is kept — it names the policy that already
+     * exists, which is the better remedy — and same-method Idor findings are
+     * dropped. Method bounds come from the AST, never from line proximity.
+     *
+     * @param  array<int, Vulnerability>  $findings
+     * @param  array<int, SourceFile>  $sourceFiles
+     * @return array<int, Vulnerability>
+     */
+    private function collapseSameMethodAccessControl(array $findings, array $sourceFiles): array
+    {
+        $bypassSpans = [];
+
+        foreach ($findings as $finding) {
+            if ($finding->type !== VulnerabilityType::AuthBypass) {
+                continue;
+            }
+
+            $span = $this->methodSpanAt($finding->location, $finding->line, $sourceFiles);
+
+            if ($span !== null) {
+                $bypassSpans[] = ['location' => $finding->location, 'span' => $span];
+            }
+        }
+
+        if ($bypassSpans === []) {
+            return $findings;
+        }
+
+        return array_values(array_filter($findings, function (Vulnerability $finding) use ($bypassSpans): bool {
+            if ($finding->type !== VulnerabilityType::Idor) {
+                return true;
+            }
+
+            foreach ($bypassSpans as $bypass) {
+                if ($this->isSameFile($finding->location, $bypass['location'])
+                    && $finding->line >= $bypass['span'][0]
+                    && $finding->line <= $bypass['span'][1]) {
+                    return false;
+                }
+            }
+
+            return true;
+        }));
+    }
+
+    /**
+     * The [start, end] lines of the class method containing a line, or null.
+     *
+     * @param  array<int, SourceFile>  $sourceFiles
+     * @return array{0: int, 1: int}|null
+     */
+    private function methodSpanAt(string $location, int $line, array $sourceFiles): ?array
+    {
+        foreach ($sourceFiles as $file) {
+            if (! $this->isSameFile($file->path, $location)) {
+                continue;
+            }
+
+            try {
+                $ast = (new ParserFactory)->createForNewestSupportedVersion()->parse($file->content) ?? [];
+            } catch (Throwable) {
+                return null;
+            }
+
+            foreach ((new NodeFinder)->findInstanceOf($ast, ClassMethod::class) as $method) {
+                if ($line >= $method->getStartLine() && $line <= $method->getEndLine()) {
+                    return [$method->getStartLine(), $method->getEndLine()];
+                }
+            }
+
+            return null;
+        }
+
+        return null;
     }
 
     /**
      * Merge deterministic access-control findings with an existing finding list
-     * (typically the AI findings) and de-duplicate across the ENTIRE combined
-     * list, keeping the FIRST occurrence of each fingerprint.
+     * (typically the AI findings), collapsing only what is genuinely the same
+     * issue.
      *
-     * Deduping the whole list — rather than only the deterministic findings
-     * against the existing ones — collapses (a) two AI findings of the same
-     * type at the same place (e.g. the same IDOR reported at two nearby lines)
-     * and (b) an AI finding and a deterministic finding for the same flaw whose
-     * `location` strings differ only in path format (basename vs absolute vs
-     * relative). Existing findings are visited before deterministic ones, so an
-     * AI finding always wins the "first occurrence" tie and is the one kept.
+     * Two different rules apply, because the two kinds of overlap have
+     * different causes:
+     *
+     * - ACROSS sources (an AI finding vs a deterministic finding), the same
+     *   flaw is routinely reported a few lines apart — the AI at the vulnerable
+     *   statement, the detector at the method signature — and with differently
+     *   formatted paths. These collapse on same file + same type token + line
+     *   PROXIMITY. This is the v1.7 dedup fix that took benchmark precision
+     *   from ≈0.73 to ≈0.89, and it is kept as-is for the cross-source case.
+     * - WITHIN one source, two findings at different lines are two claims.
+     *   Proximity used to apply here too, so two separate SQL injections four
+     *   lines apart in one method became one, and an IDOR at line 20 swallowed
+     *   the auth bypass at line 24. Within a source only EXACT duplicates
+     *   (same file, same type token, same line) collapse.
+     *
+     * Existing findings are visited before deterministic ones, so an AI
+     * finding always wins a cross-source tie and is the one kept.
      *
      * @param  array<int, Vulnerability>  $existing  AI/other findings (visited first; win ties)
      * @param  array<int, Vulnerability>  $deterministic  Access-control findings to merge in
@@ -119,13 +229,24 @@ final class AccessControlAnalyzer
      */
     public function merge(array $existing, array $deterministic): array
     {
-        return $this->dedupe([...$existing, ...$deterministic]);
+        $kept = $this->dedupe($existing);
+
+        foreach ($this->dedupe($deterministic) as $candidate) {
+            foreach ($kept as $existingFinding) {
+                if ($this->isSameIssueAcrossSources($candidate, $existingFinding)) {
+                    continue 2;
+                }
+            }
+
+            $kept[] = $candidate;
+        }
+
+        return array_values($kept);
     }
 
     /**
-     * Remove duplicate findings within a list by fingerprint, keeping the first
-     * occurrence. Used both for a single detector pass and for the combined
-     * AI-plus-deterministic list in merge().
+     * Remove exact duplicates from a single-source list, keeping the first
+     * occurrence. Used for one detector pass and for each side of merge().
      *
      * @param  array<int, Vulnerability>  $findings
      * @return array<int, Vulnerability>
@@ -136,7 +257,7 @@ final class AccessControlAnalyzer
 
         foreach ($findings as $vulnerability) {
             foreach ($kept as $existing) {
-                if ($this->isSameIssue($vulnerability, $existing)) {
+                if ($this->isExactDuplicate($vulnerability, $existing)) {
                     continue 2;
                 }
             }
@@ -148,41 +269,123 @@ final class AccessControlAnalyzer
     }
 
     /**
-     * Decide whether two findings describe the SAME underlying issue and should
-     * collapse into one.
+     * Whether two findings from the SAME source are one finding emitted twice.
      *
-     * Two findings are the same issue when they share a file, a type, and sit
-     * within LINE_PROXIMITY lines of each other:
+     * Same file and type token, and either the same line, or lines within
+     * SAME_SOURCE_PROXIMITY carrying the same evidence (identical proof or
+     * description once whitespace is normalised). The evidence condition is
+     * what separates a model reporting one issue twice at adjacent lines —
+     * which it does — from two genuine injections a few lines apart, which
+     * proximity alone used to merge into one, losing a real finding.
      *
-     * - Location is compared by lowercased BASENAME, not the full path, so the
-     *   same file collapses whether one source reported a basename, a relative
-     *   path, or an absolute path.
-     * - Lines are compared by PROXIMITY (absolute distance) rather than by a fixed
-     *   bucket. A fixed floor(line/3) bucket put adjacent lines on opposite sides
-     *   of a boundary (e.g. line 14 in bucket 4 but line 15 in bucket 5), so the
-     *   same vulnerability reported a couple of lines apart by the AI and the
-     *   deterministic detector failed to collapse. Proximity has no such seams.
-     * - Access-control SYNONYMS (Idor and AuthBypass, both OWASP A01) share a
-     *   single type token so the same flaw is never reported or penalized twice.
-     *
-     * Residual risk: two genuinely different files that share a basename AND have
-     * a same-type finding within LINE_PROXIMITY lines would collapse. This is
-     * rare, and the alternative (path-sensitive matching) misses the far more
-     * common case of the same file referenced by differently-formatted paths.
+     * Access-control SYNONYMS (Idor and AuthBypass, both OWASP A01) share a
+     * token, so the same flaw labelled both ways at one line still collapses.
      */
-    private function isSameIssue(Vulnerability $a, Vulnerability $b): bool
+    private function isExactDuplicate(Vulnerability $a, Vulnerability $b): bool
     {
-        return $this->basename($a->location) === $this->basename($b->location)
-            && $this->typeToken($a->type) === $this->typeToken($b->type)
-            && abs($a->line - $b->line) <= self::LINE_PROXIMITY;
+        if ($this->typeToken($a->type) !== $this->typeToken($b->type)
+            || ! $this->isSameFile($a->location, $b->location)) {
+            return false;
+        }
+
+        if ($a->line === $b->line) {
+            return true;
+        }
+
+        if (abs($a->line - $b->line) > self::SAME_SOURCE_PROXIMITY) {
+            return false;
+        }
+
+        $normalise = static fn (string $text): string => strtolower(trim((string) preg_replace('/\s+/', ' ', $text)));
+
+        $sameProof = $normalise($a->proof) !== '' && $normalise($a->proof) === $normalise($b->proof);
+        $sameDescription = $normalise($a->description) !== '' && $normalise($a->description) === $normalise($b->description);
+
+        return $sameProof || $sameDescription;
     }
 
     /**
-     * Lowercased file basename used for path-format-tolerant location matching.
+     * Decide whether an AI finding and a deterministic finding describe the
+     * SAME underlying issue and should collapse into one.
+     *
+     * - Same file, by normalised path (see isSameFile()).
+     * - Same type token: access-control SYNONYMS (Idor and AuthBypass) share
+     *   one, so the same flaw is never reported or penalized twice.
+     * - Lines within LINE_PROXIMITY. A fixed floor(line/3) bucket used to put
+     *   adjacent lines on opposite sides of a boundary (line 14 in bucket 4,
+     *   line 15 in bucket 5); proximity has no such seams.
      */
-    private function basename(string $location): string
+    private function isSameIssueAcrossSources(Vulnerability $a, Vulnerability $b): bool
     {
-        return strtolower(basename(str_replace('\\', '/', $location)));
+        return abs($a->line - $b->line) <= self::LINE_PROXIMITY
+            && $this->typeToken($a->type) === $this->typeToken($b->type)
+            && $this->isSameFile($a->location, $b->location);
+    }
+
+    /**
+     * Whether two locations name the same file.
+     *
+     * Paths are normalised first (backslashes, the application base path, and
+     * a leading "./" or "/" are stripped; case is folded). They then match
+     * when equal, or when one is a path-segment suffix of the other — the
+     * same file referenced relative by one source and absolute by the other.
+     *
+     * The BASENAME is only trusted when one side IS a bare basename (the AI
+     * sometimes reports just "UserController.php"). Comparing basenames of
+     * two full paths merged Api/UserController.php with
+     * Admin/UserController.php, which are different controllers with
+     * different bugs.
+     */
+    private function isSameFile(string $a, string $b): bool
+    {
+        $left = $this->normalizePath($a);
+        $right = $this->normalizePath($b);
+
+        if ($left === $right) {
+            return true;
+        }
+
+        if (str_ends_with($left, '/'.$right) || str_ends_with($right, '/'.$left)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Fold a location into a comparable relative path.
+     */
+    private function normalizePath(string $location): string
+    {
+        $path = str_replace('\\', '/', trim($location));
+        $base = $this->basePath();
+
+        if ($base !== null && str_starts_with(strtolower($path), strtolower($base).'/')) {
+            $path = substr($path, strlen($base) + 1);
+        }
+
+        while (str_starts_with($path, './')) {
+            $path = substr($path, 2);
+        }
+
+        return strtolower(ltrim($path, '/'));
+    }
+
+    /**
+     * The application base path with forward slashes and no trailing slash,
+     * or null when no container is bound (pure unit usage).
+     */
+    private function basePath(): ?string
+    {
+        if ($this->basePath === false) {
+            try {
+                $this->basePath = rtrim(str_replace('\\', '/', base_path()), '/');
+            } catch (Throwable) {
+                $this->basePath = null;
+            }
+        }
+
+        return $this->basePath;
     }
 
     /**

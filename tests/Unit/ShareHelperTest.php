@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Mahdi\HackAuditor\Scanner\ScanCoverage;
 use Mahdi\HackAuditor\Scanner\Vulnerability;
 use Mahdi\HackAuditor\Scanner\VulnerabilityReport;
 use Mahdi\HackAuditor\Support\SeverityLevel;
@@ -249,4 +250,18 @@ it('console share block contains total vulnerability count', function (): void {
     $block = $this->helper->consoleShareBlock($report);
 
     expect($block)->toContain('Vulnerabilities Found: 2');
+});
+
+// Score suppression
+
+it('never shares a withheld score as a number', function (): void {
+    $report = buildTestReport(score: 100, severities: [SeverityLevel::Low]);
+    $report->setCoverage(ScanCoverage::none());
+
+    $tweet = rawurldecode(substr($this->helper->twitterUrl($report), strlen('https://twitter.com/intent/tweet?text=')));
+
+    expect($tweet)->not->toContain('100/100')->toContain('withheld')
+        ->and($this->helper->markdownSummary($report))->toContain('security%20score-n%2Fa-lightgrey')->not->toContain('100%2F100')
+        ->and($this->helper->templateTweet($report))->not->toContain('100/100')
+        ->and($this->helper->consoleShareBlock($report))->toContain('Security Score:     n/a')->not->toContain('100/100');
 });

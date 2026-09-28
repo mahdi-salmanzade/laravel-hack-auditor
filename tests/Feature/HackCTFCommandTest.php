@@ -117,3 +117,9 @@ it('command from-scan flag fails when no scan results exist', function (): void 
         ->expectsOutputToContain('No scan results found')
         ->assertFailed();
 });
+
+it('--all implies --from-scan instead of silently opening the interactive menu', function (): void {
+    $this->artisan('hack:ctf', ['--all' => true])
+        ->expectsOutputToContain('No scan results found')
+        ->assertFailed();
+});

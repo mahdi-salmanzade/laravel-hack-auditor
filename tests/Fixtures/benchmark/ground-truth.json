@@ -88,7 +88,7 @@
                 {
                     "type": "auth_bypass",
                     "line": 16,
-                    "engine": "ai",
+                    "engine": "deterministic",
                     "accepted_types": ["auth_bypass", "idor"]
                 }
             ]
