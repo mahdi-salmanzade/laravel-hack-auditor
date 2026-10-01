@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Route-bound writes without authorization are now raised for review.** `destroy(Invoice $invoice) { $invoice->delete(); }` — and `forceDelete()`, `deleteOrFail()`, `update($request->all())` and their quiet variants called on the bound record — on a confirmed single-segment route with no authorization anywhere (no `authorize()`/`Gate::`/`can:` middleware, `authorizeResource()`, static `middleware()`, authorising form request or ownership comparison) is a **review** item at High severity: any caller who can reach the route may be able to delete or rewrite any row. It closes the known limit listed for v2.3.0, where the binding rule covered only records handed back to the client. It is never an asserted vulnerability and never carries a fix, for the same reason as the read path: implicit binding can be customised outside the code the scan reads. When an action both writes and returns the bound record, the write is what is reported.
 
+### Security
+
+- **`laravel/ai` floor raised to `1.0.1`** (constraint now `^0.11|^1.0.1`), so installs can no longer resolve the 1.0.0 release affected by [GHSA-6qhr-3g93-pxhw](https://github.com/advisories/GHSA-6qhr-3g93-pxhw) (SSRF in the Vercel and AG-UI adapters). The auditor uses neither adapter; this only keeps the vulnerable version out of downstream lockfiles. The existing `laravel/mcp` constraint already excludes the versions affected by GHSA-mx2h-h55v-pm44.
+
 ### Measured Impact
 
 - **No change on real code.** Re-run over the same six applications (4,769 files) in both route modes: findings identical to v2.3.0 in all 12 runs — 0 asserted, 28 review items without a route map, 3 with one. The corpora hold 53 controllers with a route-bound write shape; every one is guarded (spot-checked: koel's `UserController::destroy` and `PlaylistSongController::destroy` both call `$this->authorize()`), and the rule stays silent on all of them.
